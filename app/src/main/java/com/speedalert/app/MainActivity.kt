@@ -1,11 +1,13 @@
 package com.speedalert.app
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Button
 import android.widget.TextView
@@ -13,6 +15,11 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import org.osmdroid.config.Configuration
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.MapView
+import org.osmdroid.views.overlay.Marker
 
 class MainActivity : AppCompatActivity() {
 
@@ -21,13 +28,19 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvStatus: TextView
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
+    private lateinit var mapView: MapView
+    private var locationMarker: Marker? = null
 
     private val LOCATION_PERMISSION_CODE = 1001
     private val BACKGROUND_LOCATION_CODE = 1002
-    private val NOTIFICATION_PERMISSION_CODE = 1003
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // Configurare OSMDroid
+        Configuration.getInstance().load(this, getSharedPreferences("osmdroid", MODE_PRIVATE))
+        Configuration.getInstance().userAgentValue = packageName
+        
         setContentView(R.layout.activity_main)
 
         tvSpeedLimit = findViewById(R.id.tvSpeedLimit)
@@ -35,11 +48,15 @@ class MainActivity : AppCompatActivity() {
         tvStatus = findViewById(R.id.tvStatus)
         btnStart = findViewById(R.id.btnStart)
         btnStop = findViewById(R.id.btnStop)
+        mapView = findViewById(R.id.mapView)
+
+        // Configurare hartă
+        setupMap()
 
         btnStart.setOnClickListener { startService() }
         btnStop.setOnClickListener { stopService() }
 
-        // Register receiver for updates
+        // Observă datele de la serviciu
         SpeedAlertService.speedLimitLiveData.observe(this) { limit ->
             tvSpeedLimit.text = if (limit > 0) "$limit" else "--"
         }
@@ -51,8 +68,63 @@ class MainActivity : AppCompatActivity() {
         SpeedAlertService.statusLiveData.observe(this) { status ->
             tvStatus.text = status
         }
+        
+        // Observă poziția și actualizează harta
+        SpeedAlertService.locationLiveData.observe(this) { location ->
+            updateMapLocation(location.first, location.second)
+        }
 
         checkPermissions()
+        requestBatteryOptimizationExemption()
+    }
+    
+    private fun setupMap() {
+        mapView.setTileSource(TileSourceFactory.MAPNIK)
+        mapView.setMultiTouchControls(true)
+        mapView.controller.setZoom(17.0)
+        
+        // Poziție inițială (Germania/Romania)
+        val startPoint = GeoPoint(48.1351, 11.5820)
+        mapView.controller.setCenter(startPoint)
+    }
+    
+    private fun updateMapLocation(lat: Double, lon: Double) {
+        val point = GeoPoint(lat, lon)
+        
+        // Șterge marker-ul vechi
+        if (locationMarker != null) {
+            mapView.overlays.remove(locationMarker)
+        }
+        
+        // Adaugă marker nou
+        locationMarker = Marker(mapView).apply {
+            position = point
+            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+            title = "Tu ești aici"
+            
+            val limit = SpeedAlertService.speedLimitLiveData.value ?: 0
+            snippet = if (limit > 0) "Limită: $limit km/h" else "Limită necunoscută"
+        }
+        mapView.overlays.add(locationMarker)
+        
+        // Centrează harta pe poziția curentă
+        mapView.controller.animateTo(point)
+        mapView.invalidate()
+    }
+    
+    private fun requestBatteryOptimizationExemption() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
+                try {
+                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                    intent.data = Uri.parse("package:$packageName")
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    // Unele telefoane nu permit asta
+                }
+            }
+        }
     }
 
     private fun checkPermissions() {
@@ -77,6 +149,8 @@ class MainActivity : AppCompatActivity() {
 
         if (permissions.isNotEmpty()) {
             ActivityCompat.requestPermissions(this, permissions.toTypedArray(), LOCATION_PERMISSION_CODE)
+        } else {
+            checkBackgroundLocationPermission()
         }
     }
 
@@ -84,6 +158,7 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION)
                 != PackageManager.PERMISSION_GRANTED) {
+                Toast.makeText(this, "Permite locația în fundal pentru funcționare cu ecranul închis!", Toast.LENGTH_LONG).show()
                 ActivityCompat.requestPermissions(
                     this,
                     arrayOf(Manifest.permission.ACCESS_BACKGROUND_LOCATION),
@@ -105,9 +180,6 @@ class MainActivity : AppCompatActivity() {
                 if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
                     checkBackgroundLocationPermission()
                 }
-            }
-            BACKGROUND_LOCATION_CODE -> {
-                // Background location granted or denied
             }
         }
     }
@@ -136,5 +208,15 @@ class MainActivity : AppCompatActivity() {
         stopService(intent)
         btnStart.isEnabled = true
         btnStop.isEnabled = false
+    }
+    
+    override fun onResume() {
+        super.onResume()
+        mapView.onResume()
+    }
+    
+    override fun onPause() {
+        super.onPause()
+        mapView.onPause()
     }
 }

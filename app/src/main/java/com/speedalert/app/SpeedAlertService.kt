@@ -14,6 +14,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.Looper
 import android.os.Handler
+import android.os.PowerManager
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import android.view.Gravity
@@ -36,6 +37,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         val speedLimitLiveData = MutableLiveData<Int>()
         val currentSpeedLiveData = MutableLiveData<Float>()
         val statusLiveData = MutableLiveData<String>()
+        val locationLiveData = MutableLiveData<Pair<Double, Double>>()
         
         private const val CHANNEL_ID = "SpeedAlertChannel"
         private const val NOTIFICATION_ID = 1
@@ -43,6 +45,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
 
     private lateinit var tts: TextToSpeech
     private lateinit var locationManager: LocationManager
+    private var wakeLock: PowerManager.WakeLock? = null
     private var lastSpeedLimit = -1
     private var ttsReady = false
     private val serviceScope = CoroutineScope(Dispatchers.IO + Job())
@@ -51,7 +54,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private var warningCount = 0
     private var lastWarningTime = 0L
     private var isCurrentlySpeeding = false
-    private var alreadyWarnedForThisZone = false  // DOAR 3 avertizări per zonă!
+    private var alreadyWarnedForThisZone = false
     private val handler = Handler(Looper.getMainLooper())
     
     // Cache pentru limite de viteză (reduce întârzierea)
@@ -69,6 +72,15 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         tts = TextToSpeech(this, this)
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        
+        // Wake lock pentru funcționare cu ecranul închis
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "SpeedAlert::LocationWakeLock"
+        )
+        wakeLock?.acquire()
+        
         createNotificationChannel()
         createFloatingBubble()
     }
@@ -139,6 +151,9 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     override fun onLocationChanged(location: Location) {
         val speedKmh = location.speed * 3.6f
         currentSpeedLiveData.postValue(speedKmh)
+        
+        // Trimite poziția pentru hartă
+        locationLiveData.postValue(Pair(location.latitude, location.longitude))
         
         updateNotification("Viteză: ${speedKmh.toInt()} km/h | Limită: ${if (cachedSpeedLimit > 0) cachedSpeedLimit else "?"}")
         
@@ -405,6 +420,14 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         tts.stop()
         tts.shutdown()
         serviceScope.cancel()
+        
+        // Eliberează wake lock
+        wakeLock?.let {
+            if (it.isHeld) {
+                it.release()
+            }
+        }
+        
         statusLiveData.postValue("Oprit")
     }
 }

@@ -3,121 +3,114 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:gravity="center"
-    android:padding="24dp"
     android:background="#1a1a2e">
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="🚗 Speed Alert"
-        android:textSize="28sp"
-        android:textColor="#00d9ff"
-        android:textStyle="bold"
-        android:layout_marginBottom="8dp" />
-
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Avertizare limită de viteză"
-        android:textSize="14sp"
-        android:textColor="#888888"
-        android:layout_marginBottom="32dp" />
-
-    <!-- Speed Limit Circle -->
-    <FrameLayout
-        android:layout_width="180dp"
-        android:layout_height="180dp"
-        android:background="@drawable/speed_circle"
-        android:layout_marginBottom="24dp">
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="match_parent"
-            android:orientation="vertical"
-            android:gravity="center">
-
-            <TextView
-                android:id="@+id/tvSpeedLimit"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="--"
-                android:textSize="64sp"
-                android:textColor="#ffffff"
-                android:textStyle="bold" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="LIMITĂ"
-                android:textSize="12sp"
-                android:textColor="#aaaaaa" />
-
-        </LinearLayout>
-    </FrameLayout>
-
-    <!-- Current Speed -->
+    <!-- Header cu viteza -->
     <LinearLayout
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:gravity="center"
-        android:background="@drawable/rounded_bg"
-        android:padding="20dp"
-        android:layout_marginBottom="24dp">
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:padding="16dp"
+        android:background="#0f0f1a">
 
+        <!-- Limita -->
+        <FrameLayout
+            android:layout_width="80dp"
+            android:layout_height="80dp"
+            android:background="@drawable/speed_circle">
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:orientation="vertical"
+                android:gravity="center">
+                <TextView
+                    android:id="@+id/tvSpeedLimit"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="--"
+                    android:textSize="32sp"
+                    android:textColor="#ffffff"
+                    android:textStyle="bold" />
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="LIMITĂ"
+                    android:textSize="8sp"
+                    android:textColor="#aaaaaa" />
+            </LinearLayout>
+        </FrameLayout>
+
+        <!-- Viteza curenta -->
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:layout_marginStart="16dp">
+            <TextView
+                android:id="@+id/tvCurrentSpeed"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="0"
+                android:textSize="48sp"
+                android:textColor="#00d9ff"
+                android:textStyle="bold" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="km/h"
+                android:textSize="14sp"
+                android:textColor="#888888" />
+        </LinearLayout>
+
+        <!-- Status -->
         <TextView
-            android:id="@+id/tvCurrentSpeed"
+            android:id="@+id/tvStatus"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="0"
-            android:textSize="48sp"
-            android:textColor="#00d9ff"
-            android:textStyle="bold" />
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="km/h viteza ta"
+            android:text="Oprit"
             android:textSize="12sp"
-            android:textColor="#888888" />
-
+            android:textColor="#888888"
+            android:padding="8dp" />
     </LinearLayout>
 
-    <!-- Status -->
-    <TextView
-        android:id="@+id/tvStatus"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Oprit"
-        android:textSize="14sp"
-        android:textColor="#888888"
-        android:layout_marginBottom="24dp" />
+    <!-- Harta OpenStreetMap -->
+    <org.osmdroid.views.MapView
+        android:id="@+id/mapView"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
 
-    <!-- Buttons -->
+    <!-- Butoane -->
     <LinearLayout
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="horizontal">
+        android:orientation="horizontal"
+        android:gravity="center"
+        android:padding="16dp"
+        android:background="#0f0f1a">
 
         <Button
             android:id="@+id/btnStart"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="56dp"
             android:text="▶ PORNEȘTE"
             android:textColor="#ffffff"
             android:backgroundTint="#00cc66"
-            android:layout_marginEnd="16dp" />
+            android:layout_marginEnd="8dp" />
 
         <Button
             android:id="@+id/btnStop"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="56dp"
             android:text="⬛ OPREȘTE"
             android:textColor="#ffffff"
             android:backgroundTint="#ff4444"
             android:enabled="false" />
-
     </LinearLayout>
 
 </LinearLayout>
