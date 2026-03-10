@@ -51,6 +51,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private var warningCount = 0
     private var lastWarningTime = 0L
     private var isCurrentlySpeeding = false
+    private var alreadyWarnedForThisZone = false  // DOAR 3 avertizări per zonă!
     private val handler = Handler(Looper.getMainLooper())
     
     // Cache pentru limite de viteză (reduce întârzierea)
@@ -144,14 +145,14 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         // Actualizează bubble-ul flotant
         updateFloatingBubble(speedKmh.toInt(), cachedSpeedLimit)
         
-        // Verifică dacă suntem departe de ultima căutare (>50m) sau nu avem limită
+        // Verifică dacă suntem departe de ultima căutare (>25m) sau nu avem limită
         val distance = floatArrayOf(0f)
         if (lastQueryLat != 0.0) {
             Location.distanceBetween(lastQueryLat, lastQueryLon, location.latitude, location.longitude, distance)
         }
         
-        // Caută limită nouă dacă ne-am deplasat >50m sau nu avem limită
-        if (distance[0] > 50 || cachedSpeedLimit < 0 || lastQueryLat == 0.0) {
+        // Caută limită nouă dacă ne-am deplasat >25m sau nu avem limită (era 50m)
+        if (distance[0] > 25 || cachedSpeedLimit < 0 || lastQueryLat == 0.0) {
             lastQueryLat = location.latitude
             lastQueryLon = location.longitude
             
@@ -170,6 +171,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                         // Resetează avertizările la schimbarea zonei
                         warningCount = 0
                         isCurrentlySpeeding = false
+                        alreadyWarnedForThisZone = false
                     }
                 }
             }
@@ -182,15 +184,18 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private fun checkSpeedingAndWarn(speedKmh: Float, limit: Int) {
         if (limit <= 0) return
         
-        val currentTime = System.currentTimeMillis()
         val isOver = speedKmh > limit + 3  // toleranță de 3 km/h
         
         if (isOver) {
+            // Dacă am dat deja 3 avertizări în această zonă, NU mai avertiza
+            if (alreadyWarnedForThisZone) {
+                return  // TACE!
+            }
+            
             if (!isCurrentlySpeeding) {
                 // Prima avertizare - IMEDIAT
                 isCurrentlySpeeding = true
                 warningCount = 1
-                lastWarningTime = currentTime
                 
                 val over = (speedKmh - limit).toInt()
                 speakUrgent("Atenție! Depășești limita cu $over kilometri!")
@@ -198,7 +203,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 
                 // Programează avertizarea 2 după 3 secunde
                 handler.postDelayed({
-                    if (isCurrentlySpeeding && warningCount < 3) {
+                    if (isCurrentlySpeeding && warningCount == 1) {
                         val currentSpeed = currentSpeedLiveData.value ?: 0f
                         if (currentSpeed > limit + 3) {
                             warningCount = 2
@@ -207,23 +212,17 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                     }
                 }, 3000)
                 
-                // Programează avertizarea 3 după 6 secunde - MAI DIRECTĂ 😄
+                // Programează avertizarea 3 după 6 secunde - și GATA!
                 handler.postDelayed({
-                    if (isCurrentlySpeeding && warningCount < 3) {
+                    if (isCurrentlySpeeding && warningCount == 2) {
                         val currentSpeed = currentSpeedLiveData.value ?: 0f
                         if (currentSpeed > limit + 3) {
                             warningCount = 3
+                            alreadyWarnedForThisZone = true  // Nu mai avertiza în această zonă!
                             speak("Boule! Încetinește odată! Vrei amendă?")
                         }
                     }
                 }, 6000)
-                
-            } else if (currentTime - lastWarningTime > 10000 && warningCount >= 3) {
-                // Repetă avertizările la fiecare 10 secunde dacă încă depășește
-                lastWarningTime = currentTime
-                warningCount = 1
-                val over = (speedKmh - limit).toInt()
-                speakUrgent("Încă depășești cu $over kilometri! Limita e $limit!")
             }
         } else {
             // A încetinit
@@ -231,17 +230,17 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 isCurrentlySpeeding = false
                 warningCount = 0
                 handler.removeCallbacksAndMessages(null)
-                speak("Bine! Viteză în regulă.")
+                // NU mai spune "Bine! Viteză în regulă" - prea enervant
             }
         }
     }
 
     private fun getSpeedLimit(lat: Double, lon: Double): Int? {
         return try {
-            // Rază mai mare pentru a prinde mai multe drumuri
-            val radius = 50
+            // Rază MARE pentru a detecta zonele din timp (100m în față)
+            val radius = 100
             val query = """
-                [out:json][timeout:10];
+                [out:json][timeout:5];
                 (
                   way(around:$radius,$lat,$lon)["maxspeed"];
                   way(around:$radius,$lat,$lon)["highway"]["maxspeed"];
