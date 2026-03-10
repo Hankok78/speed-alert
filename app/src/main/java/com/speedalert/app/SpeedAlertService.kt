@@ -145,14 +145,14 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         // Actualizează bubble-ul flotant
         updateFloatingBubble(speedKmh.toInt(), cachedSpeedLimit)
         
-        // Verifică dacă suntem departe de ultima căutare (>25m) sau nu avem limită
+        // Verifică dacă suntem departe de ultima căutare (>15m) sau nu avem limită
         val distance = floatArrayOf(0f)
         if (lastQueryLat != 0.0) {
             Location.distanceBetween(lastQueryLat, lastQueryLon, location.latitude, location.longitude, distance)
         }
         
-        // Caută limită nouă dacă ne-am deplasat >25m sau nu avem limită (era 50m)
-        if (distance[0] > 25 || cachedSpeedLimit < 0 || lastQueryLat == 0.0) {
+        // Caută limită nouă dacă ne-am deplasat >15m sau nu avem limită
+        if (distance[0] > 15 || cachedSpeedLimit < 0 || lastQueryLat == 0.0) {
             lastQueryLat = location.latitude
             lastQueryLon = location.longitude
             
@@ -184,53 +184,30 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private fun checkSpeedingAndWarn(speedKmh: Float, limit: Int) {
         if (limit <= 0) return
         
-        val isOver = speedKmh > limit + 3  // toleranță de 3 km/h
+        val over = (speedKmh - limit).toInt()
         
-        if (isOver) {
-            // Dacă am dat deja 3 avertizări în această zonă, NU mai avertiza
-            if (alreadyWarnedForThisZone) {
-                return  // TACE!
-            }
-            
-            if (!isCurrentlySpeeding) {
-                // Prima avertizare - IMEDIAT
+        // Depășire cu peste 7 km/h - avertisment "boule"
+        if (over > 7) {
+            if (!alreadyWarnedForThisZone) {
+                alreadyWarnedForThisZone = true
                 isCurrentlySpeeding = true
-                warningCount = 1
-                
-                val over = (speedKmh - limit).toInt()
-                speakUrgent("Atenție! Depășești limita cu $over kilometri!")
+                speakUrgent("Boule! Încetinește că iei amendă!")
                 updateNotification("⚠️ DEPĂȘIRE! ${speedKmh.toInt()} / $limit km/h")
-                
-                // Programează avertizarea 2 după 3 secunde
-                handler.postDelayed({
-                    if (isCurrentlySpeeding && warningCount == 1) {
-                        val currentSpeed = currentSpeedLiveData.value ?: 0f
-                        if (currentSpeed > limit + 3) {
-                            warningCount = 2
-                            speak("Încetinește! Limita este $limit!")
-                        }
-                    }
-                }, 3000)
-                
-                // Programează avertizarea 3 după 6 secunde - și GATA!
-                handler.postDelayed({
-                    if (isCurrentlySpeeding && warningCount == 2) {
-                        val currentSpeed = currentSpeedLiveData.value ?: 0f
-                        if (currentSpeed > limit + 3) {
-                            warningCount = 3
-                            alreadyWarnedForThisZone = true  // Nu mai avertiza în această zonă!
-                            speak("Boule! Încetinește odată! Vrei amendă?")
-                        }
-                    }
-                }, 6000)
             }
-        } else {
-            // A încetinit
+        }
+        // Depășire cu 3-7 km/h - avertisment normal
+        else if (over > 3) {
+            if (!isCurrentlySpeeding) {
+                isCurrentlySpeeding = true
+                speak("Ai depășit limita cu $over kilometri")
+                updateNotification("⚠️ ${speedKmh.toInt()} / $limit km/h")
+            }
+        }
+        // Sub limită sau în toleranță
+        else {
             if (isCurrentlySpeeding) {
                 isCurrentlySpeeding = false
-                warningCount = 0
                 handler.removeCallbacksAndMessages(null)
-                // NU mai spune "Bine! Viteză în regulă" - prea enervant
             }
         }
     }
