@@ -237,15 +237,11 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
 
     private fun getSpeedLimit(lat: Double, lon: Double): Int? {
         return try {
-            // Rază MARE pentru a detecta zonele din timp (100m în față)
-            val radius = 100
+            // Căutare cu rază mică pentru precizie
+            val radius = 25
             val query = """
                 [out:json][timeout:5];
-                (
-                  way(around:$radius,$lat,$lon)["maxspeed"];
-                  way(around:$radius,$lat,$lon)["highway"]["maxspeed"];
-                  way(around:$radius,$lat,$lon)["highway"~"residential|living_street|service"];
-                );
+                way(around:$radius,$lat,$lon)["maxspeed"];
                 out tags;
             """.trimIndent()
             
@@ -254,8 +250,8 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             connection.requestMethod = "POST"
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
-            connection.connectTimeout = 8000
-            connection.readTimeout = 8000
+            connection.connectTimeout = 5000
+            connection.readTimeout = 5000
             
             val postData = "data=${URLEncoder.encode(query, "UTF-8")}"
             connection.outputStream.write(postData.toByteArray())
@@ -267,33 +263,42 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             val elements = json.optJSONArray("elements")
             
             if (elements != null && elements.length() > 0) {
+                // Colectează toate drumurile cu limite
+                val roads = mutableListOf<Pair<Int, Int>>() // limit, priority
+                
                 for (i in 0 until elements.length()) {
                     val element = elements.getJSONObject(i)
                     val tags = element.optJSONObject("tags")
                     if (tags != null) {
-                        // Verifică maxspeed explicit
                         val maxspeed = tags.optString("maxspeed", "")
+                        val highway = tags.optString("highway", "")
+                        
                         if (maxspeed.isNotEmpty()) {
                             val match = Regex("(\\d+)").find(maxspeed)
                             if (match != null) {
-                                return match.groupValues[1].toInt()
+                                val limit = match.groupValues[1].toInt()
+                                // Drumuri principale au prioritate mare
+                                val priority = when (highway) {
+                                    "motorway", "motorway_link" -> 100
+                                    "trunk", "trunk_link" -> 90
+                                    "primary", "primary_link" -> 80
+                                    "secondary", "secondary_link" -> 70
+                                    "tertiary", "tertiary_link" -> 60
+                                    "unclassified" -> 50
+                                    "residential" -> 20
+                                    "living_street" -> 10
+                                    "service" -> 5
+                                    else -> 40
+                                }
+                                roads.add(Pair(limit, priority))
                             }
                         }
-                        
-                        // Dacă nu are maxspeed, estimează după tipul drumului
-                        val highway = tags.optString("highway", "")
-                        when (highway) {
-                            "motorway" -> return 130
-                            "motorway_link" -> return 80
-                            "trunk" -> return 100
-                            "primary" -> return 90
-                            "secondary" -> return 70
-                            "tertiary" -> return 50
-                            "residential" -> return 50
-                            "living_street" -> return 30
-                            "service" -> return 30
-                        }
                     }
+                }
+                
+                // Alege drumul cu prioritate maximă (drumul principal)
+                if (roads.isNotEmpty()) {
+                    return roads.maxByOrNull { it.second }?.first
                 }
             }
             null
