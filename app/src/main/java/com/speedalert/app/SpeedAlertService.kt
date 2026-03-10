@@ -251,19 +251,22 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             serviceScope.launch {
                 val limit = getSpeedLimit(location.latitude, location.longitude)
                 if (limit != null && limit > 0) {
+                    val oldLimit = cachedSpeedLimit
                     cachedSpeedLimit = limit
                     speedLimitLiveData.postValue(limit)
                     
-                    // Anunță schimbarea limitei
+                    // Anunță ORICE schimbare de limită (30, 50, 60, etc.)
                     if (lastSpeedLimit != limit) {
-                        withContext(Dispatchers.Main) {
-                            speak("Limită $limit")
-                        }
                         lastSpeedLimit = limit
                         // Resetează avertizările la schimbarea zonei
                         warningCount = 0
                         isCurrentlySpeeding = false
                         alreadyWarnedForThisZone = false
+                        
+                        // Anunță vocal noua limită
+                        withContext(Dispatchers.Main) {
+                            speak("Limită $limit")
+                        }
                     }
                 }
             }
@@ -307,11 +310,14 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
 
     private fun getSpeedLimit(lat: Double, lon: Double): Int? {
         return try {
-            // Căutare cu rază mică pentru precizie
-            val radius = 25
+            // Căutare cu rază mai mare pentru a găsi drumuri
+            val radius = 35
             val query = """
                 [out:json][timeout:5];
-                way(around:$radius,$lat,$lon)["maxspeed"];
+                (
+                  way(around:$radius,$lat,$lon)["maxspeed"];
+                  way(around:$radius,$lat,$lon)["highway"];
+                );
                 out tags;
             """.trimIndent()
             
@@ -343,25 +349,50 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                         val maxspeed = tags.optString("maxspeed", "")
                         val highway = tags.optString("highway", "")
                         
+                        var limit: Int? = null
+                        var priority = 0
+                        
+                        // Prioritate pentru tip de drum
+                        priority = when (highway) {
+                            "motorway", "motorway_link" -> 100
+                            "trunk", "trunk_link" -> 90
+                            "primary", "primary_link" -> 80
+                            "secondary", "secondary_link" -> 70
+                            "tertiary", "tertiary_link" -> 60
+                            "unclassified" -> 50
+                            "residential" -> 20
+                            "living_street" -> 10
+                            "service" -> 5
+                            else -> 1
+                        }
+                        
+                        // Dacă are maxspeed explicit, folosește-l
                         if (maxspeed.isNotEmpty()) {
                             val match = Regex("(\\d+)").find(maxspeed)
                             if (match != null) {
-                                val limit = match.groupValues[1].toInt()
-                                // Drumuri principale au prioritate mare
-                                val priority = when (highway) {
-                                    "motorway", "motorway_link" -> 100
-                                    "trunk", "trunk_link" -> 90
-                                    "primary", "primary_link" -> 80
-                                    "secondary", "secondary_link" -> 70
-                                    "tertiary", "tertiary_link" -> 60
-                                    "unclassified" -> 50
-                                    "residential" -> 20
-                                    "living_street" -> 10
-                                    "service" -> 5
-                                    else -> 40
-                                }
-                                roads.add(Pair(limit, priority))
+                                limit = match.groupValues[1].toInt()
+                                priority += 50 // Bonus pentru maxspeed explicit
                             }
+                        } else {
+                            // Estimează limita pe baza tipului de drum (Germania/România)
+                            limit = when (highway) {
+                                "motorway" -> 130
+                                "motorway_link" -> 80
+                                "trunk" -> 100
+                                "trunk_link" -> 60
+                                "primary" -> 100
+                                "primary_link" -> 50
+                                "secondary" -> 70
+                                "tertiary" -> 50
+                                "residential" -> 50
+                                "living_street" -> 30
+                                "service" -> 30
+                                else -> null
+                            }
+                        }
+                        
+                        if (limit != null && priority > 0) {
+                            roads.add(Pair(limit, priority))
                         }
                     }
                 }
