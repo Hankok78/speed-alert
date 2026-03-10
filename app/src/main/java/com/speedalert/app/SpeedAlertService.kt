@@ -203,10 +203,11 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 updateNotification("⚠️ ${speedKmh.toInt()} / $limit km/h")
             }
         }
-        // Sub limită sau în toleranță
+        // Sub limită sau în toleranță - RESETEAZĂ pentru a permite noi avertizări
         else {
-            if (isCurrentlySpeeding) {
+            if (isCurrentlySpeeding || alreadyWarnedForThisZone) {
                 isCurrentlySpeeding = false
+                alreadyWarnedForThisZone = false  // RESETEAZĂ când încetinește!
                 handler.removeCallbacksAndMessages(null)
             }
         }
