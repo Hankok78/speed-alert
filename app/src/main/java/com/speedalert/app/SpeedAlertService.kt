@@ -10,13 +10,18 @@ import android.graphics.PixelFormat
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
 import android.os.Looper
 import android.os.Handler
 import android.os.PowerManager
+import android.os.Bundle
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.view.Gravity
 import android.view.WindowManager
 import android.widget.TextView
@@ -45,6 +50,8 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
 
     private lateinit var tts: TextToSpeech
     private lateinit var locationManager: LocationManager
+    private lateinit var audioManager: AudioManager
+    private var audioFocusRequest: AudioFocusRequest? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var lastSpeedLimit = -1
     private var ttsReady = false
@@ -72,6 +79,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         tts = TextToSpeech(this, this)
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         
         // Wake lock pentru funcționare cu ecranul închis
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -80,6 +88,19 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             "SpeedAlert::LocationWakeLock"
         )
         wakeLock?.acquire()
+        
+        // Configurare audio focus pentru Android Auto
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val audioAttributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+            
+            audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                .setAudioAttributes(audioAttributes)
+                .setOnAudioFocusChangeListener { }
+                .build()
+        }
         
         createNotificationChannel()
         createFloatingBubble()
@@ -99,20 +120,76 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 tts.setLanguage(Locale.GERMAN)
             }
             ttsReady = true
-            tts.setSpeechRate(1.1f) // Puțin mai rapid
+            tts.setSpeechRate(1.1f)
+            
+            // Setează stream-ul audio pentru navigație (prioritate înaltă în Android Auto)
+            val params = Bundle()
+            params.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_NOTIFICATION)
+            
+            // Listener pentru a elibera audio focus după ce termină de vorbit
+            tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {
+                    // Audio focus cerut în speak()
+                }
+                override fun onDone(utteranceId: String?) {
+                    releaseAudioFocus()
+                }
+                override fun onError(utteranceId: String?) {
+                    releaseAudioFocus()
+                }
+            })
+            
             speak("Avertizare viteză pornită")
+        }
+    }
+    
+    private fun requestAudioFocus() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest?.let {
+                audioManager.requestAudioFocus(it)
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.requestAudioFocus(
+                null,
+                AudioManager.STREAM_NOTIFICATION,
+                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+            )
+        }
+        
+        // Mărește volumul pentru notificări
+        try {
+            val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_NOTIFICATION)
+            audioManager.setStreamVolume(AudioManager.STREAM_NOTIFICATION, maxVolume, 0)
+        } catch (e: Exception) { }
+    }
+    
+    private fun releaseAudioFocus() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest?.let {
+                audioManager.abandonAudioFocusRequest(it)
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.abandonAudioFocus(null)
         }
     }
 
     private fun speak(text: String) {
         if (ttsReady) {
-            tts.speak(text, TextToSpeech.QUEUE_ADD, null, "speedalert_${System.currentTimeMillis()}")
+            requestAudioFocus()
+            val params = Bundle()
+            params.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_NOTIFICATION)
+            tts.speak(text, TextToSpeech.QUEUE_ADD, params, "speedalert_${System.currentTimeMillis()}")
         }
     }
 
     private fun speakUrgent(text: String) {
         if (ttsReady) {
-            tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "speedalert_urgent")
+            requestAudioFocus()
+            val params = Bundle()
+            params.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_ALARM)
+            tts.speak(text, TextToSpeech.QUEUE_FLUSH, params, "speedalert_urgent")
         }
     }
 
