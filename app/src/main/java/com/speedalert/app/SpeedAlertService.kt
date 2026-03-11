@@ -310,7 +310,60 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
 
     private fun getSpeedLimit(lat: Double, lon: Double): Int? {
         return try {
-            // Căutare cu rază mai mare pentru a găsi drumuri
+            // Folosește TomTom API pentru limite de viteză precise
+            val tomtomKey = "4F7NveARkj9ilHALcjNgT0Sa4VUG01bA"
+            val url = URL("https://api.tomtom.com/search/2/reverseGeocode/$lat,$lon.json?key=$tomtomKey&returnSpeedLimit=true")
+            
+            val connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 5000
+            connection.readTimeout = 5000
+            
+            val response = connection.inputStream.bufferedReader().readText()
+            connection.disconnect()
+            
+            val json = JSONObject(response)
+            val addresses = json.optJSONArray("addresses")
+            
+            if (addresses != null && addresses.length() > 0) {
+                val address = addresses.getJSONObject(0)
+                val addressInfo = address.optJSONObject("address")
+                
+                // Încearcă să obții limita de viteză
+                if (addressInfo != null) {
+                    val speedLimit = addressInfo.optInt("speedLimit", -1)
+                    if (speedLimit > 0) {
+                        return speedLimit
+                    }
+                    
+                    // Dacă nu e disponibilă, estimează pe baza tipului de drum
+                    val roadType = addressInfo.optString("streetNameAndNumber", "")
+                    val roadClass = addressInfo.optString("roadUse", "")
+                    
+                    // Estimare pe baza codului de țară și tip drum
+                    val countryCode = addressInfo.optString("countryCode", "")
+                    
+                    return when {
+                        roadClass.contains("motorway", true) -> 130
+                        roadClass.contains("trunk", true) -> 100
+                        roadClass.contains("arterial", true) -> 70
+                        roadClass.contains("local", true) -> 50
+                        else -> null
+                    }
+                }
+            }
+            
+            // Fallback la Overpass API dacă TomTom nu returnează nimic
+            getSpeedLimitFromOSM(lat, lon)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            // Fallback la OpenStreetMap
+            getSpeedLimitFromOSM(lat, lon)
+        }
+    }
+    
+    private fun getSpeedLimitFromOSM(lat: Double, lon: Double): Int? {
+        return try {
             val radius = 35
             val query = """
                 [out:json][timeout:5];
@@ -339,8 +392,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             val elements = json.optJSONArray("elements")
             
             if (elements != null && elements.length() > 0) {
-                // Colectează toate drumurile cu limite
-                val roads = mutableListOf<Pair<Int, Int>>() // limit, priority
+                val roads = mutableListOf<Pair<Int, Int>>()
                 
                 for (i in 0 until elements.length()) {
                     val element = elements.getJSONObject(i)
@@ -350,10 +402,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                         val highway = tags.optString("highway", "")
                         
                         var limit: Int? = null
-                        var priority = 0
-                        
-                        // Prioritate pentru tip de drum
-                        priority = when (highway) {
+                        var priority = when (highway) {
                             "motorway", "motorway_link" -> 100
                             "trunk", "trunk_link" -> 90
                             "primary", "primary_link" -> 80
@@ -366,22 +415,18 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                             else -> 1
                         }
                         
-                        // Dacă are maxspeed explicit, folosește-l
                         if (maxspeed.isNotEmpty()) {
                             val match = Regex("(\\d+)").find(maxspeed)
                             if (match != null) {
                                 limit = match.groupValues[1].toInt()
-                                priority += 50 // Bonus pentru maxspeed explicit
+                                priority += 50
                             }
                         } else {
-                            // Estimează limita pe baza tipului de drum (Germania/România)
                             limit = when (highway) {
                                 "motorway" -> 130
                                 "motorway_link" -> 80
                                 "trunk" -> 100
-                                "trunk_link" -> 60
                                 "primary" -> 100
-                                "primary_link" -> 50
                                 "secondary" -> 70
                                 "tertiary" -> 50
                                 "residential" -> 50
@@ -397,7 +442,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                     }
                 }
                 
-                // Alege drumul cu prioritate maximă (drumul principal)
                 if (roads.isNotEmpty()) {
                     return roads.maxByOrNull { it.second }?.first
                 }
