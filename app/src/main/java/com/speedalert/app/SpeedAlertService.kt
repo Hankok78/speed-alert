@@ -329,19 +329,17 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 val address = addresses.getJSONObject(0)
                 val addressInfo = address.optJSONObject("address")
                 
-                // Încearcă să obții limita de viteză
                 if (addressInfo != null) {
-                    val speedLimit = addressInfo.optInt("speedLimit", -1)
-                    if (speedLimit > 0) {
-                        return speedLimit
+                    // TomTom returnează speedLimit ca string "30.00KPH"
+                    val speedLimitStr = addressInfo.optString("speedLimit", "")
+                    if (speedLimitStr.isNotEmpty()) {
+                        val match = Regex("(\\d+)").find(speedLimitStr)
+                        if (match != null) {
+                            return match.groupValues[1].toInt()
+                        }
                     }
                     
-                    // Dacă nu e disponibilă, estimează pe baza tipului de drum
-                    val roadType = addressInfo.optString("streetNameAndNumber", "")
                     val roadClass = addressInfo.optString("roadUse", "")
-                    
-                    // Estimare pe baza codului de țară și tip drum
-                    val countryCode = addressInfo.optString("countryCode", "")
                     
                     return when {
                         roadClass.contains("motorway", true) -> 130
@@ -353,11 +351,10 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 }
             }
             
-            // Fallback la Overpass API dacă TomTom nu returnează nimic
+            // Fallback la Overpass API cu suport pentru limite condiționale
             getSpeedLimitFromOSM(lat, lon)
         } catch (e: Exception) {
             e.printStackTrace()
-            // Fallback la OpenStreetMap
             getSpeedLimitFromOSM(lat, lon)
         }
     }
@@ -365,10 +362,12 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private fun getSpeedLimitFromOSM(lat: Double, lon: Double): Int? {
         return try {
             val radius = 35
+            // Caut și maxspeed:conditional pentru limite bazate pe timp
             val query = """
                 [out:json][timeout:5];
                 (
                   way(around:$radius,$lat,$lon)["maxspeed"];
+                  way(around:$radius,$lat,$lon)["maxspeed:conditional"];
                   way(around:$radius,$lat,$lon)["highway"];
                 );
                 out tags;
@@ -391,6 +390,10 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             val json = JSONObject(response)
             val elements = json.optJSONArray("elements")
             
+            // Ora curentă pentru limite condiționale
+            val calendar = Calendar.getInstance()
+            val currentHour = calendar.get(Calendar.HOUR_OF_DAY)
+            
             if (elements != null && elements.length() > 0) {
                 val roads = mutableListOf<Pair<Int, Int>>()
                 
@@ -399,6 +402,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                     val tags = element.optJSONObject("tags")
                     if (tags != null) {
                         val maxspeed = tags.optString("maxspeed", "")
+                        val maxspeedConditional = tags.optString("maxspeed:conditional", "")
                         val highway = tags.optString("highway", "")
                         
                         var limit: Int? = null
@@ -415,13 +419,26 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                             else -> 1
                         }
                         
-                        if (maxspeed.isNotEmpty()) {
+                        // Verifică limite condiționale (ex: "30 @ (Mo-Fr 07:00-18:00)")
+                        if (maxspeedConditional.isNotEmpty()) {
+                            val conditionalLimit = parseConditionalSpeedLimit(maxspeedConditional, currentHour)
+                            if (conditionalLimit != null) {
+                                limit = conditionalLimit
+                                priority += 100 // Prioritate maximă pentru limite condiționale active
+                            }
+                        }
+                        
+                        // Dacă nu avem limită condițională activă, folosește maxspeed normal
+                        if (limit == null && maxspeed.isNotEmpty()) {
                             val match = Regex("(\\d+)").find(maxspeed)
                             if (match != null) {
                                 limit = match.groupValues[1].toInt()
                                 priority += 50
                             }
-                        } else {
+                        }
+                        
+                        // Estimare pe baza tipului de drum
+                        if (limit == null) {
                             limit = when (highway) {
                                 "motorway" -> 130
                                 "motorway_link" -> 80
@@ -451,6 +468,31 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             e.printStackTrace()
             null
         }
+    }
+    
+    // Parsează limite condiționale bazate pe timp
+    // Ex: "30 @ (Mo-Fr 07:00-18:00)" sau "30 @ (06:00-22:00)"
+    private fun parseConditionalSpeedLimit(conditional: String, currentHour: Int): Int? {
+        try {
+            // Extrage limita și intervalul orar
+            // Format: "30 @ (Mo-Fr 07:00-18:00)" sau "30 @ (07:00-18:00)"
+            val limitMatch = Regex("(\\d+)\\s*@").find(conditional)
+            val timeMatch = Regex("(\\d{1,2}):(\\d{2})-(\\d{1,2}):(\\d{2})").find(conditional)
+            
+            if (limitMatch != null && timeMatch != null) {
+                val limit = limitMatch.groupValues[1].toInt()
+                val startHour = timeMatch.groupValues[1].toInt()
+                val endHour = timeMatch.groupValues[3].toInt()
+                
+                // Verifică dacă suntem în intervalul orar
+                if (currentHour >= startHour && currentHour < endHour) {
+                    return limit
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        return null
     }
 
     private fun createNotificationChannel() {
