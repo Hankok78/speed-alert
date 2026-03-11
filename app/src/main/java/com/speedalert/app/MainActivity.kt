@@ -73,41 +73,34 @@ class MainActivity : AppCompatActivity() {
         mapWebView.settings.domStorageEnabled = true
         mapWebView.settings.loadWithOverviewMode = true
         mapWebView.settings.useWideViewPort = true
-        mapWebView.settings.allowContentAccess = true
-        mapWebView.settings.allowFileAccess = true
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            mapWebView.settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-        }
-        mapWebView.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
         mapWebView.webViewClient = WebViewClient()
         
-        // Încarcă harta TomTom direct
-        val mapUrl = "https://api.tomtom.com/map/1/staticimage?key=$TOMTOM_KEY&zoom=15&center=11.5820,48.1351&width=512&height=512&layer=basic&style=main&format=png"
-        
-        // Folosim HTML simplu cu harta
+        // Folosim OpenStreetMap (Leaflet) - mai stabil
         val html = """
 <!DOCTYPE html>
 <html>
 <head>
-<meta charset="UTF-8">
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
-<link rel="stylesheet" type="text/css" href="https://api.tomtom.com/maps-sdk-for-web/cdn/6.x/6.25.0/maps/maps.css"/>
-<script src="https://api.tomtom.com/maps-sdk-for-web/cdn/6.x/6.25.0/maps/maps-web.min.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
-html,body{margin:0;padding:0;width:100%;height:100%;}
-#map{width:100%;height:100%;}
+html,body,#map{margin:0;padding:0;width:100%;height:100%;}
 </style>
 </head>
 <body>
 <div id="map"></div>
 <script>
-tt.setProductInfo('SpeedAlert','1.0');
-var map=tt.map({key:'$TOMTOM_KEY',container:'map',center:[11.5820,48.1351],zoom:15});
+var map=L.map('map').setView([48.1351,11.5820],15);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{
+maxZoom:19,
+attribution:'OpenStreetMap'
+}).addTo(map);
 var marker=null;
 function updateLocation(lat,lon){
-if(marker)marker.remove();
-marker=new tt.Marker().setLngLat([lon,lat]).addTo(map);
-map.setCenter([lon,lat]);
+if(marker)map.removeLayer(marker);
+marker=L.marker([lat,lon]).addTo(map);
+map.setView([lat,lon],16);
 }
 </script>
 </body>
