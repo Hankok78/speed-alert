@@ -246,7 +246,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     }
 
     private fun getSpeedLimit(lat: Double, lon: Double): Int? {
-        // Încearcă TomTom
+        // Încearcă TomTom pentru limită exactă
         var limit = getSpeedLimitFromTomTom(lat, lon)
         
         // Dacă TomTom nu are, încearcă OSM
@@ -254,13 +254,108 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             limit = getSpeedLimitFromOSM(lat, lon)
         }
         
-        // Dacă nici OSM nu are, estimează 50 (default urban)
+        // Dacă nici unul nu are limită exactă, detectează tipul drumului și aplică regulile germane
         if (limit == null || limit <= 0) {
-            Log.d(TAG, "No speed limit found, using default 50")
-            limit = 50
+            limit = getSpeedLimitByRoadType(lat, lon)
         }
         
         return limit
+    }
+    
+    // Detectează tipul drumului și aplică regulile standard din Germania
+    private fun getSpeedLimitByRoadType(lat: Double, lon: Double): Int? {
+        return try {
+            val radius = 30
+            val query = "[out:json][timeout:5];way(around:$radius,$lat,$lon)[highway];out tags;"
+            
+            val url = URL("https://overpass-api.de/api/interpreter")
+            val connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "POST"
+            connection.doOutput = true
+            connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+            connection.connectTimeout = 5000
+            connection.readTimeout = 5000
+            
+            val postData = "data=${URLEncoder.encode(query, "UTF-8")}"
+            connection.outputStream.write(postData.toByteArray())
+            
+            val response = connection.inputStream.bufferedReader().readText()
+            connection.disconnect()
+            
+            val json = JSONObject(response)
+            val elements = json.optJSONArray("elements")
+            
+            if (elements != null && elements.length() > 0) {
+                // Găsește drumul cu cea mai mare prioritate
+                var bestLimit = 50  // Default urban
+                var bestPriority = 0
+                
+                for (i in 0 until elements.length()) {
+                    val element = elements.getJSONObject(i)
+                    val tags = element.optJSONObject("tags")
+                    if (tags != null) {
+                        val highway = tags.optString("highway", "")
+                        val zone = tags.optString("zone:traffic", "")
+                        val maxspeed = tags.optString("maxspeed", "")
+                        
+                        // Dacă are maxspeed explicit, folosește-l
+                        if (maxspeed.isNotEmpty() && maxspeed != "none") {
+                            val match = Regex("(\\d+)").find(maxspeed)
+                            if (match != null) {
+                                return match.groupValues[1].toInt()
+                            }
+                        }
+                        
+                        // Aplică regulile germane pe baza tipului de drum
+                        val (limit, priority) = when (highway) {
+                            "motorway" -> Pair(130, 100)
+                            "motorway_link" -> Pair(80, 95)
+                            "trunk" -> Pair(100, 90)
+                            "trunk_link" -> Pair(60, 85)
+                            "primary" -> Pair(100, 80)
+                            "primary_link" -> Pair(50, 75)
+                            "secondary" -> Pair(70, 70)
+                            "secondary_link" -> Pair(50, 65)
+                            "tertiary" -> Pair(50, 60)
+                            "tertiary_link" -> Pair(50, 55)
+                            "unclassified" -> Pair(50, 50)
+                            "residential" -> Pair(30, 45)  // Zone rezidențiale = 30
+                            "living_street" -> Pair(20, 40)  // Spielstraße = 20
+                            "service" -> Pair(20, 30)
+                            "pedestrian" -> Pair(10, 20)
+                            else -> Pair(50, 10)
+                        }
+                        
+                        // Verifică zone:traffic pentru zone speciale
+                        if (zone == "DE:urban" || zone == "urban") {
+                            if (priority > bestPriority) {
+                                bestLimit = 50
+                                bestPriority = priority + 10
+                            }
+                        } else if (zone == "DE:rural" || zone == "rural") {
+                            if (priority > bestPriority) {
+                                bestLimit = 100
+                                bestPriority = priority + 10
+                            }
+                        }
+                        
+                        if (priority > bestPriority) {
+                            bestLimit = limit
+                            bestPriority = priority
+                        }
+                    }
+                }
+                
+                Log.d(TAG, "Road type detection: limit=$bestLimit")
+                return bestLimit
+            }
+            
+            // Dacă nu găsim nimic, default 50 (urban)
+            50
+        } catch (e: Exception) {
+            Log.e(TAG, "Road type detection error: ${e.message}")
+            50
+        }
     }
     
     private fun getSpeedLimitFromTomTom(lat: Double, lon: Double): Int? {
@@ -268,12 +363,10 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             val tomtomKey = "4F7NveARkj9ilHALcjNgT0Sa4VUG01bA"
             val url = URL("https://api.tomtom.com/search/2/reverseGeocode/$lat,$lon.json?key=$tomtomKey&returnSpeedLimit=true")
             
-            Log.d(TAG, "Querying TomTom: $lat, $lon")
-            
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
-            connection.connectTimeout = 5000
-            connection.readTimeout = 5000
+            connection.connectTimeout = 3000
+            connection.readTimeout = 3000
             
             val response = connection.inputStream.bufferedReader().readText()
             connection.disconnect()
@@ -287,22 +380,16 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 
                 if (addressInfo != null) {
                     val speedLimitStr = addressInfo.optString("speedLimit", "")
-                    Log.d(TAG, "TomTom speedLimit: $speedLimitStr")
-                    
                     if (speedLimitStr.isNotEmpty()) {
                         val match = Regex("(\\d+)").find(speedLimitStr)
                         if (match != null) {
-                            val limit = match.groupValues[1].toInt()
-                            Log.d(TAG, "TomTom parsed limit: $limit")
-                            return limit
+                            return match.groupValues[1].toInt()
                         }
                     }
                 }
             }
-            
             null
         } catch (e: Exception) {
-            Log.e(TAG, "TomTom error: ${e.message}")
             null
         }
     }
