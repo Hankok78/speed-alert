@@ -191,7 +191,8 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                             lastAnnouncedLimit = limit
                             isCurrentlySpeeding = false
                             alreadyWarnedForThisZone = false
-                            waitingForNewLimit = false  // Am primit limita nouă
+                            warnedOnce = false  // RESETEAZĂ - zonă nouă!
+                            waitingForNewLimit = false
                             
                             withContext(Dispatchers.Main) {
                                 announceMessage("Atenție! Limită de $limit")
@@ -213,35 +214,57 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         }
     }
     
+    // Mesaje comice pentru depășire (6+ km/h)
+    private val funnyWarnings = listOf(
+        "Boule! Încetinește că iei amendă!",
+        "Ai prea mulți bani în buzunar? Încetinește!",
+        "Nu ai ce face cu banii? Vrei să-i dai la poliție?",
+        "Vrei să plătești amendă? Că e scumpă!",
+        "Hei șoferule! Frânează odată!",
+        "Încetinește că nu ești pe autobahn!",
+        "Ce grăbit ești! Încetinește!",
+        "Radar în față! Glumesc, dar încetinește!",
+        "Portofelul tău plânge! Încetinește!",
+        "Banii tăi, amenda lor! Frânează!"
+    )
+    
+    private var warnedOnce = false  // O singură avertizare per zonă
+    
     private fun checkSpeedingAndWarn(speedKmh: Float, limit: Int) {
         if (limit <= 0) return
         
-        // Verifică dacă limita e proaspătă (sub 3 secunde)
+        // Verifică dacă limita e proaspătă
         val limitAge = System.currentTimeMillis() - limitUpdateTime
         if (limitAge > 5000 && limitUpdateTime > 0) {
-            // Limita e veche - nu avertiza, așteaptă update
             return
         }
         
         val over = (speedKmh - limit).toInt()
         
-        if (over > 7) {
-            if (!alreadyWarnedForThisZone) {
-                alreadyWarnedForThisZone = true
+        // Depășire 6+ km/h - mesaj COMIC (o singură dată!)
+        if (over >= 6) {
+            if (!warnedOnce) {
+                warnedOnce = true
                 isCurrentlySpeeding = true
-                announceUrgent("Boule! Încetinește că iei amendă!")
+                alreadyWarnedForThisZone = true
+                announceUrgent(funnyWarnings.random())
                 updateNotification("⚠️ DEPĂȘIRE! ${speedKmh.toInt()} / $limit km/h")
             }
-        } else if (over > 3) {
-            if (!isCurrentlySpeeding) {
+        } 
+        // Depășire 3-5 km/h - avertizare simplă (o singură dată!)
+        else if (over > 3) {
+            if (!warnedOnce) {
+                warnedOnce = true
                 isCurrentlySpeeding = true
-                announceMessage("Ai depășit limita cu $over kilometri")
+                announceMessage("Atenție, ai depășit limita.")
                 updateNotification("⚠️ ${speedKmh.toInt()} / $limit km/h")
             }
-        } else {
-            if (isCurrentlySpeeding || alreadyWarnedForThisZone) {
+        } 
+        // Sub limită - resetează
+        else {
+            if (isCurrentlySpeeding) {
                 isCurrentlySpeeding = false
-                alreadyWarnedForThisZone = false
+                // NU resetăm warnedOnce - rămâne true până schimbă strada/zona
             }
         }
     }
