@@ -176,35 +176,41 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             Location.distanceBetween(lastQueryLat, lastQueryLon, location.latitude, location.longitude, distance)
         }
         
-        // Verifică la fiecare 15 metri
-        if (distance[0] > 15 || cachedSpeedLimit <= 0 || lastQueryLat == 0.0) {
+        // Verifică la fiecare 20 metri sau dacă nu avem limită
+        val shouldQuery = distance[0] > 20 || cachedSpeedLimit <= 0 || lastQueryLat == 0.0
+        
+        if (shouldQuery) {
             lastQueryLat = location.latitude
             lastQueryLon = location.longitude
             
             serviceScope.launch {
                 try {
                     val limit = getSpeedLimit(location.latitude, location.longitude)
-                    Log.d(TAG, "Got speed limit: $limit (cached: $cachedSpeedLimit, lastAnnounced: $lastAnnouncedLimit)")
+                    Log.d(TAG, "=== RESULT === limit: $limit, cached: $cachedSpeedLimit, lastAnnounced: $lastAnnouncedLimit")
                     
                     if (limit != null && limit > 0) {
+                        // Actualizează cache-ul
+                        val previousLimit = cachedSpeedLimit
                         cachedSpeedLimit = limit
                         speedLimitLiveData.postValue(limit)
                         
-                        // ANUNȚĂ DACĂ LIMITA S-A SCHIMBAT
+                        // ANUNȚĂ DACĂ E DIFERIT DE ULTIMA ANUNȚATĂ
                         if (limit != lastAnnouncedLimit) {
-                            Log.d(TAG, "Speed limit changed! Announcing: $limit")
+                            Log.d(TAG, ">>> ANNOUNCING NEW LIMIT: $limit (was: $lastAnnouncedLimit)")
                             lastAnnouncedLimit = limit
                             isCurrentlySpeeding = false
                             alreadyWarnedForThisZone = false
                             
-                            // ANUNȚ VOCAL PE MAIN THREAD
+                            // ANUNȚ VOCAL
                             withContext(Dispatchers.Main) {
-                                announceMessage("Atenție! Limită de $limit")
+                                handler.post {
+                                    announceMessage("Atenție! Limită de $limit")
+                                }
                             }
                         }
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error getting speed limit: ${e.message}")
+                    Log.e(TAG, "Error in location changed: ${e.message}")
                 }
             }
         }
@@ -240,6 +246,24 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     }
 
     private fun getSpeedLimit(lat: Double, lon: Double): Int? {
+        // Încearcă TomTom
+        var limit = getSpeedLimitFromTomTom(lat, lon)
+        
+        // Dacă TomTom nu are, încearcă OSM
+        if (limit == null || limit <= 0) {
+            limit = getSpeedLimitFromOSM(lat, lon)
+        }
+        
+        // Dacă nici OSM nu are, estimează 50 (default urban)
+        if (limit == null || limit <= 0) {
+            Log.d(TAG, "No speed limit found, using default 50")
+            limit = 50
+        }
+        
+        return limit
+    }
+    
+    private fun getSpeedLimitFromTomTom(lat: Double, lon: Double): Int? {
         return try {
             val tomtomKey = "4F7NveARkj9ilHALcjNgT0Sa4VUG01bA"
             val url = URL("https://api.tomtom.com/search/2/reverseGeocode/$lat,$lon.json?key=$tomtomKey&returnSpeedLimit=true")
@@ -269,18 +293,17 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                         val match = Regex("(\\d+)").find(speedLimitStr)
                         if (match != null) {
                             val limit = match.groupValues[1].toInt()
-                            Log.d(TAG, "Parsed limit: $limit")
+                            Log.d(TAG, "TomTom parsed limit: $limit")
                             return limit
                         }
                     }
                 }
             }
             
-            Log.d(TAG, "TomTom returned no limit, trying OSM")
-            getSpeedLimitFromOSM(lat, lon)
+            null
         } catch (e: Exception) {
             Log.e(TAG, "TomTom error: ${e.message}")
-            getSpeedLimitFromOSM(lat, lon)
+            null
         }
     }
     
