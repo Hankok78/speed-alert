@@ -71,56 +71,50 @@ class MainActivity : AppCompatActivity() {
     private fun setupMap() {
         mapWebView.settings.javaScriptEnabled = true
         mapWebView.settings.domStorageEnabled = true
+        mapWebView.settings.loadWithOverviewMode = true
+        mapWebView.settings.useWideViewPort = true
+        mapWebView.settings.allowContentAccess = true
+        mapWebView.settings.allowFileAccess = true
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            mapWebView.settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+        }
+        mapWebView.setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
         mapWebView.webViewClient = WebViewClient()
         
-        // Încarcă harta TomTom
+        // Încarcă harta TomTom direct
+        val mapUrl = "https://api.tomtom.com/map/1/staticimage?key=$TOMTOM_KEY&zoom=15&center=11.5820,48.1351&width=512&height=512&layer=basic&style=main&format=png"
+        
+        // Folosim HTML simplu cu harta
         val html = """
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-                <link rel="stylesheet" href="https://api.tomtom.com/maps-sdk-for-web/cdn/6.x/6.25.0/maps/maps.css">
-                <script src="https://api.tomtom.com/maps-sdk-for-web/cdn/6.x/6.25.0/maps/maps-web.min.js"></script>
-                <style>
-                    * { margin: 0; padding: 0; }
-                    #map { width: 100%; height: 100vh; }
-                </style>
-            </head>
-            <body>
-                <div id="map"></div>
-                <script>
-                    var map = tt.map({
-                        key: '$TOMTOM_KEY',
-                        container: 'map',
-                        center: [11.5820, 48.1351],
-                        zoom: 15,
-                        style: 'tomtom://vector/1/basic-main'
-                    });
-                    
-                    var marker = null;
-                    
-                    function updateLocation(lat, lon) {
-                        if (marker) {
-                            marker.remove();
-                        }
-                        marker = new tt.Marker({
-                            color: '#00aaff'
-                        })
-                        .setLngLat([lon, lat])
-                        .addTo(map);
-                        
-                        map.flyTo({
-                            center: [lon, lat],
-                            zoom: 16
-                        });
-                    }
-                </script>
-            </body>
-            </html>
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<link rel="stylesheet" type="text/css" href="https://api.tomtom.com/maps-sdk-for-web/cdn/6.x/6.25.0/maps/maps.css"/>
+<script src="https://api.tomtom.com/maps-sdk-for-web/cdn/6.x/6.25.0/maps/maps-web.min.js"></script>
+<style>
+html,body{margin:0;padding:0;width:100%;height:100%;}
+#map{width:100%;height:100%;}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+tt.setProductInfo('SpeedAlert','1.0');
+var map=tt.map({key:'$TOMTOM_KEY',container:'map',center:[11.5820,48.1351],zoom:15});
+var marker=null;
+function updateLocation(lat,lon){
+if(marker)marker.remove();
+marker=new tt.Marker().setLngLat([lon,lat]).addTo(map);
+map.setCenter([lon,lat]);
+}
+</script>
+</body>
+</html>
         """.trimIndent()
         
-        mapWebView.loadDataWithBaseURL("https://api.tomtom.com", html, "text/html", "UTF-8", null)
+        mapWebView.loadData(android.util.Base64.encodeToString(html.toByteArray(), android.util.Base64.NO_PADDING), "text/html", "base64")
     }
     
     private fun updateMapLocation(lat: Double, lon: Double) {
