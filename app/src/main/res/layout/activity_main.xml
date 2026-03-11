@@ -76,9 +76,9 @@
             android:padding="8dp" />
     </LinearLayout>
 
-    <!-- Harta OpenStreetMap -->
-    <org.osmdroid.views.MapView
-        android:id="@+id/mapView"
+    <!-- Harta TomTom (WebView) -->
+    <WebView
+        android:id="@+id/mapWebView"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1" />

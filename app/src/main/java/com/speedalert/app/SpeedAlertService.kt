@@ -10,18 +10,13 @@ import android.graphics.PixelFormat
 import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
-import android.media.AudioAttributes
-import android.media.AudioFocusRequest
-import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
 import android.os.Looper
 import android.os.Handler
 import android.os.PowerManager
-import android.os.Bundle
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
 import android.view.Gravity
 import android.view.WindowManager
 import android.widget.TextView
@@ -50,26 +45,19 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
 
     private lateinit var tts: TextToSpeech
     private lateinit var locationManager: LocationManager
-    private lateinit var audioManager: AudioManager
-    private var audioFocusRequest: AudioFocusRequest? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var lastSpeedLimit = -1
     private var ttsReady = false
     private val serviceScope = CoroutineScope(Dispatchers.IO + Job())
     
-    // Pentru avertizări repetate
-    private var warningCount = 0
-    private var lastWarningTime = 0L
     private var isCurrentlySpeeding = false
     private var alreadyWarnedForThisZone = false
     private val handler = Handler(Looper.getMainLooper())
     
-    // Cache pentru limite de viteză (reduce întârzierea)
     private var cachedSpeedLimit = -1
     private var lastQueryLat = 0.0
     private var lastQueryLon = 0.0
     
-    // Floating bubble
     private var windowManager: WindowManager? = null
     private var floatingBubble: TextView? = null
     private var isBubbleShowing = false
@@ -79,28 +67,13 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         tts = TextToSpeech(this, this)
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         
-        // Wake lock pentru funcționare cu ecranul închis
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
             "SpeedAlert::LocationWakeLock"
         )
         wakeLock?.acquire()
-        
-        // Configurare audio focus pentru Android Auto
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val audioAttributes = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build()
-            
-            audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-                .setAudioAttributes(audioAttributes)
-                .setOnAudioFocusChangeListener { }
-                .build()
-        }
         
         createNotificationChannel()
         createFloatingBubble()
@@ -120,76 +93,20 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 tts.setLanguage(Locale.GERMAN)
             }
             ttsReady = true
-            tts.setSpeechRate(1.1f)
-            
-            // Setează stream-ul audio pentru navigație (prioritate înaltă în Android Auto)
-            val params = Bundle()
-            params.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_NOTIFICATION)
-            
-            // Listener pentru a elibera audio focus după ce termină de vorbit
-            tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) {
-                    // Audio focus cerut în speak()
-                }
-                override fun onDone(utteranceId: String?) {
-                    releaseAudioFocus()
-                }
-                override fun onError(utteranceId: String?) {
-                    releaseAudioFocus()
-                }
-            })
-            
+            tts.setSpeechRate(1.0f)
             speak("Avertizare viteză pornită")
-        }
-    }
-    
-    private fun requestAudioFocus() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            audioFocusRequest?.let {
-                audioManager.requestAudioFocus(it)
-            }
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.requestAudioFocus(
-                null,
-                AudioManager.STREAM_NOTIFICATION,
-                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
-            )
-        }
-        
-        // Mărește volumul pentru notificări
-        try {
-            val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_NOTIFICATION)
-            audioManager.setStreamVolume(AudioManager.STREAM_NOTIFICATION, maxVolume, 0)
-        } catch (e: Exception) { }
-    }
-    
-    private fun releaseAudioFocus() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            audioFocusRequest?.let {
-                audioManager.abandonAudioFocusRequest(it)
-            }
-        } else {
-            @Suppress("DEPRECATION")
-            audioManager.abandonAudioFocus(null)
         }
     }
 
     private fun speak(text: String) {
         if (ttsReady) {
-            requestAudioFocus()
-            val params = Bundle()
-            params.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_NOTIFICATION)
-            tts.speak(text, TextToSpeech.QUEUE_ADD, params, "speedalert_${System.currentTimeMillis()}")
+            tts.speak(text, TextToSpeech.QUEUE_ADD, null, "speedalert_${System.currentTimeMillis()}")
         }
     }
 
     private fun speakUrgent(text: String) {
         if (ttsReady) {
-            requestAudioFocus()
-            val params = Bundle()
-            params.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, AudioManager.STREAM_ALARM)
-            tts.speak(text, TextToSpeech.QUEUE_FLUSH, params, "speedalert_urgent")
+            tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "speedalert_urgent")
         }
     }
 
@@ -197,18 +114,16 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) 
             == PackageManager.PERMISSION_GRANTED) {
             
-            // GPS cu frecvență MARE pentru reacție rapidă
             if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                 locationManager.requestLocationUpdates(
                     LocationManager.GPS_PROVIDER,
-                    500L,  // 0.5 secunde (era 1 secundă)
-                    2f,    // 2 metri (era 5 metri)
+                    500L,
+                    2f,
                     this,
                     Looper.getMainLooper()
                 )
             }
             
-            // Network ca backup
             if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
                 locationManager.requestLocationUpdates(
                     LocationManager.NETWORK_PROVIDER,
@@ -229,21 +144,16 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         val speedKmh = location.speed * 3.6f
         currentSpeedLiveData.postValue(speedKmh)
         
-        // Trimite poziția pentru hartă
         locationLiveData.postValue(Pair(location.latitude, location.longitude))
         
         updateNotification("Viteză: ${speedKmh.toInt()} km/h | Limită: ${if (cachedSpeedLimit > 0) cachedSpeedLimit else "?"}")
-        
-        // Actualizează bubble-ul flotant
         updateFloatingBubble(speedKmh.toInt(), cachedSpeedLimit)
         
-        // Verifică dacă suntem departe de ultima căutare (>15m) sau nu avem limită
         val distance = floatArrayOf(0f)
         if (lastQueryLat != 0.0) {
             Location.distanceBetween(lastQueryLat, lastQueryLon, location.latitude, location.longitude, distance)
         }
         
-        // Caută limită nouă dacă ne-am deplasat >15m sau nu avem limită
         if (distance[0] > 15 || cachedSpeedLimit < 0 || lastQueryLat == 0.0) {
             lastQueryLat = location.latitude
             lastQueryLon = location.longitude
@@ -255,24 +165,21 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                     cachedSpeedLimit = limit
                     speedLimitLiveData.postValue(limit)
                     
-                    // Anunță ORICE schimbare de limită (30, 50, 60, etc.)
+                    // ANUNȚĂ SCHIMBAREA LIMITEI - ÎNTOTDEAUNA!
                     if (lastSpeedLimit != limit) {
                         lastSpeedLimit = limit
-                        // Resetează avertizările la schimbarea zonei
-                        warningCount = 0
                         isCurrentlySpeeding = false
                         alreadyWarnedForThisZone = false
                         
-                        // Anunță vocal noua limită
+                        // ANUNȚ VOCAL PENTRU SCHIMBARE LIMITĂ
                         withContext(Dispatchers.Main) {
-                            speak("Limită $limit")
+                            speak("Atenție! Limită de $limit")
                         }
                     }
                 }
             }
         }
         
-        // Verifică depășire cu limita din cache (răspuns IMEDIAT)
         checkSpeedingAndWarn(speedKmh, cachedSpeedLimit)
     }
     
@@ -281,7 +188,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         
         val over = (speedKmh - limit).toInt()
         
-        // Depășire cu peste 7 km/h - avertisment "boule"
         if (over > 7) {
             if (!alreadyWarnedForThisZone) {
                 alreadyWarnedForThisZone = true
@@ -289,20 +195,16 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 speakUrgent("Boule! Încetinește că iei amendă!")
                 updateNotification("⚠️ DEPĂȘIRE! ${speedKmh.toInt()} / $limit km/h")
             }
-        }
-        // Depășire cu 3-7 km/h - avertisment normal
-        else if (over > 3) {
+        } else if (over > 3) {
             if (!isCurrentlySpeeding) {
                 isCurrentlySpeeding = true
                 speak("Ai depășit limita cu $over kilometri")
                 updateNotification("⚠️ ${speedKmh.toInt()} / $limit km/h")
             }
-        }
-        // Sub limită sau în toleranță - RESETEAZĂ pentru a permite noi avertizări
-        else {
+        } else {
             if (isCurrentlySpeeding || alreadyWarnedForThisZone) {
                 isCurrentlySpeeding = false
-                alreadyWarnedForThisZone = false  // RESETEAZĂ când încetinește!
+                alreadyWarnedForThisZone = false
                 handler.removeCallbacksAndMessages(null)
             }
         }
@@ -310,7 +212,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
 
     private fun getSpeedLimit(lat: Double, lon: Double): Int? {
         return try {
-            // Folosește TomTom API pentru limite de viteză precise
             val tomtomKey = "4F7NveARkj9ilHALcjNgT0Sa4VUG01bA"
             val url = URL("https://api.tomtom.com/search/2/reverseGeocode/$lat,$lon.json?key=$tomtomKey&returnSpeedLimit=true")
             
@@ -330,7 +231,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 val addressInfo = address.optJSONObject("address")
                 
                 if (addressInfo != null) {
-                    // TomTom returnează speedLimit ca string "30.00KPH"
                     val speedLimitStr = addressInfo.optString("speedLimit", "")
                     if (speedLimitStr.isNotEmpty()) {
                         val match = Regex("(\\d+)").find(speedLimitStr)
@@ -338,20 +238,9 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                             return match.groupValues[1].toInt()
                         }
                     }
-                    
-                    val roadClass = addressInfo.optString("roadUse", "")
-                    
-                    return when {
-                        roadClass.contains("motorway", true) -> 130
-                        roadClass.contains("trunk", true) -> 100
-                        roadClass.contains("arterial", true) -> 70
-                        roadClass.contains("local", true) -> 50
-                        else -> null
-                    }
                 }
             }
             
-            // Fallback la Overpass API cu suport pentru limite condiționale
             getSpeedLimitFromOSM(lat, lon)
         } catch (e: Exception) {
             e.printStackTrace()
@@ -362,14 +251,9 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private fun getSpeedLimitFromOSM(lat: Double, lon: Double): Int? {
         return try {
             val radius = 35
-            // Caut și maxspeed:conditional pentru limite bazate pe timp
             val query = """
                 [out:json][timeout:5];
-                (
-                  way(around:$radius,$lat,$lon)["maxspeed"];
-                  way(around:$radius,$lat,$lon)["maxspeed:conditional"];
-                  way(around:$radius,$lat,$lon)["highway"];
-                );
+                way(around:$radius,$lat,$lon)["maxspeed"];
                 out tags;
             """.trimIndent()
             
@@ -390,109 +274,26 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             val json = JSONObject(response)
             val elements = json.optJSONArray("elements")
             
-            // Ora curentă pentru limite condiționale
-            val calendar = Calendar.getInstance()
-            val currentHour = calendar.get(Calendar.HOUR_OF_DAY)
-            
             if (elements != null && elements.length() > 0) {
-                val roads = mutableListOf<Pair<Int, Int>>()
-                
                 for (i in 0 until elements.length()) {
                     val element = elements.getJSONObject(i)
                     val tags = element.optJSONObject("tags")
                     if (tags != null) {
                         val maxspeed = tags.optString("maxspeed", "")
-                        val maxspeedConditional = tags.optString("maxspeed:conditional", "")
-                        val highway = tags.optString("highway", "")
-                        
-                        var limit: Int? = null
-                        var priority = when (highway) {
-                            "motorway", "motorway_link" -> 100
-                            "trunk", "trunk_link" -> 90
-                            "primary", "primary_link" -> 80
-                            "secondary", "secondary_link" -> 70
-                            "tertiary", "tertiary_link" -> 60
-                            "unclassified" -> 50
-                            "residential" -> 20
-                            "living_street" -> 10
-                            "service" -> 5
-                            else -> 1
-                        }
-                        
-                        // Verifică limite condiționale (ex: "30 @ (Mo-Fr 07:00-18:00)")
-                        if (maxspeedConditional.isNotEmpty()) {
-                            val conditionalLimit = parseConditionalSpeedLimit(maxspeedConditional, currentHour)
-                            if (conditionalLimit != null) {
-                                limit = conditionalLimit
-                                priority += 100 // Prioritate maximă pentru limite condiționale active
-                            }
-                        }
-                        
-                        // Dacă nu avem limită condițională activă, folosește maxspeed normal
-                        if (limit == null && maxspeed.isNotEmpty()) {
+                        if (maxspeed.isNotEmpty()) {
                             val match = Regex("(\\d+)").find(maxspeed)
                             if (match != null) {
-                                limit = match.groupValues[1].toInt()
-                                priority += 50
+                                return match.groupValues[1].toInt()
                             }
-                        }
-                        
-                        // Estimare pe baza tipului de drum
-                        if (limit == null) {
-                            limit = when (highway) {
-                                "motorway" -> 130
-                                "motorway_link" -> 80
-                                "trunk" -> 100
-                                "primary" -> 100
-                                "secondary" -> 70
-                                "tertiary" -> 50
-                                "residential" -> 50
-                                "living_street" -> 30
-                                "service" -> 30
-                                else -> null
-                            }
-                        }
-                        
-                        if (limit != null && priority > 0) {
-                            roads.add(Pair(limit, priority))
                         }
                     }
                 }
-                
-                if (roads.isNotEmpty()) {
-                    return roads.maxByOrNull { it.second }?.first
-                }
             }
             null
         } catch (e: Exception) {
             e.printStackTrace()
             null
         }
-    }
-    
-    // Parsează limite condiționale bazate pe timp
-    // Ex: "30 @ (Mo-Fr 07:00-18:00)" sau "30 @ (06:00-22:00)"
-    private fun parseConditionalSpeedLimit(conditional: String, currentHour: Int): Int? {
-        try {
-            // Extrage limita și intervalul orar
-            // Format: "30 @ (Mo-Fr 07:00-18:00)" sau "30 @ (07:00-18:00)"
-            val limitMatch = Regex("(\\d+)\\s*@").find(conditional)
-            val timeMatch = Regex("(\\d{1,2}):(\\d{2})-(\\d{1,2}):(\\d{2})").find(conditional)
-            
-            if (limitMatch != null && timeMatch != null) {
-                val limit = limitMatch.groupValues[1].toInt()
-                val startHour = timeMatch.groupValues[1].toInt()
-                val endHour = timeMatch.groupValues[3].toInt()
-                
-                // Verifică dacă suntem în intervalul orar
-                if (currentHour >= startHour && currentHour < endHour) {
-                    return limit
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        return null
     }
 
     private fun createNotificationChannel() {
@@ -530,12 +331,10 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         val notificationManager = getSystemService(NotificationManager::class.java)
         notificationManager.notify(NOTIFICATION_ID, createNotification(content))
     }
-
-    override fun onBind(intent: Intent?): IBinder? = null
     
     private fun createFloatingBubble() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
-            return // Nu avem permisiune
+            return
         }
         
         try {
@@ -546,10 +345,9 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 gravity = Gravity.CENTER
                 setPadding(20, 20, 20, 20)
                 
-                // Fundal rotund
                 val shape = GradientDrawable()
                 shape.shape = GradientDrawable.OVAL
-                shape.setColor(Color.parseColor("#4CAF50")) // Verde
+                shape.setColor(Color.parseColor("#4CAF50"))
                 background = shape
             }
             
@@ -584,10 +382,10 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 val shape = bubble.background as? GradientDrawable
                 shape?.let {
                     when {
-                        limit <= 0 -> it.setColor(Color.parseColor("#2196F3")) // Albastru - nu știm limita
-                        speed > limit + 5 -> it.setColor(Color.parseColor("#F44336")) // Roșu - depășire mare
-                        speed > limit -> it.setColor(Color.parseColor("#FF9800")) // Portocaliu - ușor peste
-                        else -> it.setColor(Color.parseColor("#4CAF50")) // Verde - OK
+                        limit <= 0 -> it.setColor(Color.parseColor("#2196F3"))
+                        speed > limit + 5 -> it.setColor(Color.parseColor("#F44336"))
+                        speed > limit -> it.setColor(Color.parseColor("#FF9800"))
+                        else -> it.setColor(Color.parseColor("#4CAF50"))
                     }
                 }
             }
@@ -606,6 +404,8 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         }
     }
 
+    override fun onBind(intent: Intent?): IBinder? = null
+
     override fun onDestroy() {
         super.onDestroy()
         removeFloatingBubble()
@@ -615,7 +415,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         tts.shutdown()
         serviceScope.cancel()
         
-        // Eliberează wake lock
         wakeLock?.let {
             if (it.isHeld) {
                 it.release()

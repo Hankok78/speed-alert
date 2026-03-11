@@ -12,14 +12,12 @@ import android.provider.Settings
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.webkit.WebSettings
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import org.osmdroid.config.Configuration
-import org.osmdroid.tileprovider.tilesource.TileSourceFactory
-import org.osmdroid.util.GeoPoint
-import org.osmdroid.views.MapView
-import org.osmdroid.views.overlay.Marker
 
 class MainActivity : AppCompatActivity() {
 
@@ -28,19 +26,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvStatus: TextView
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
-    private lateinit var mapView: MapView
-    private var locationMarker: Marker? = null
+    private lateinit var mapWebView: WebView
 
     private val LOCATION_PERMISSION_CODE = 1001
     private val BACKGROUND_LOCATION_CODE = 1002
+    private val TOMTOM_KEY = "4F7NveARkj9ilHALcjNgT0Sa4VUG01bA"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
-        // Configurare OSMDroid
-        Configuration.getInstance().load(this, getSharedPreferences("osmdroid", MODE_PRIVATE))
-        Configuration.getInstance().userAgentValue = packageName
-        
         setContentView(R.layout.activity_main)
 
         tvSpeedLimit = findViewById(R.id.tvSpeedLimit)
@@ -48,15 +41,13 @@ class MainActivity : AppCompatActivity() {
         tvStatus = findViewById(R.id.tvStatus)
         btnStart = findViewById(R.id.btnStart)
         btnStop = findViewById(R.id.btnStop)
-        mapView = findViewById(R.id.mapView)
+        mapWebView = findViewById(R.id.mapWebView)
 
-        // Configurare hartă
         setupMap()
 
         btnStart.setOnClickListener { startService() }
         btnStop.setOnClickListener { stopService() }
 
-        // Observă datele de la serviciu
         SpeedAlertService.speedLimitLiveData.observe(this) { limit ->
             tvSpeedLimit.text = if (limit > 0) "$limit" else "--"
         }
@@ -69,7 +60,6 @@ class MainActivity : AppCompatActivity() {
             tvStatus.text = status
         }
         
-        // Observă poziția și actualizează harta
         SpeedAlertService.locationLiveData.observe(this) { location ->
             updateMapLocation(location.first, location.second)
         }
@@ -79,37 +69,62 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun setupMap() {
-        mapView.setTileSource(TileSourceFactory.MAPNIK)
-        mapView.setMultiTouchControls(true)
-        mapView.controller.setZoom(17.0)
+        mapWebView.settings.javaScriptEnabled = true
+        mapWebView.settings.domStorageEnabled = true
+        mapWebView.webViewClient = WebViewClient()
         
-        // Poziție inițială (Germania/Romania)
-        val startPoint = GeoPoint(48.1351, 11.5820)
-        mapView.controller.setCenter(startPoint)
+        // Încarcă harta TomTom
+        val html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+                <link rel="stylesheet" href="https://api.tomtom.com/maps-sdk-for-web/cdn/6.x/6.25.0/maps/maps.css">
+                <script src="https://api.tomtom.com/maps-sdk-for-web/cdn/6.x/6.25.0/maps/maps-web.min.js"></script>
+                <style>
+                    * { margin: 0; padding: 0; }
+                    #map { width: 100%; height: 100vh; }
+                </style>
+            </head>
+            <body>
+                <div id="map"></div>
+                <script>
+                    var map = tt.map({
+                        key: '$TOMTOM_KEY',
+                        container: 'map',
+                        center: [11.5820, 48.1351],
+                        zoom: 15,
+                        style: 'tomtom://vector/1/basic-main'
+                    });
+                    
+                    var marker = null;
+                    
+                    function updateLocation(lat, lon) {
+                        if (marker) {
+                            marker.remove();
+                        }
+                        marker = new tt.Marker({
+                            color: '#00aaff'
+                        })
+                        .setLngLat([lon, lat])
+                        .addTo(map);
+                        
+                        map.flyTo({
+                            center: [lon, lat],
+                            zoom: 16
+                        });
+                    }
+                </script>
+            </body>
+            </html>
+        """.trimIndent()
+        
+        mapWebView.loadDataWithBaseURL("https://api.tomtom.com", html, "text/html", "UTF-8", null)
     }
     
     private fun updateMapLocation(lat: Double, lon: Double) {
-        val point = GeoPoint(lat, lon)
-        
-        // Șterge marker-ul vechi
-        if (locationMarker != null) {
-            mapView.overlays.remove(locationMarker)
-        }
-        
-        // Adaugă marker nou
-        locationMarker = Marker(mapView).apply {
-            position = point
-            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
-            title = "Tu ești aici"
-            
-            val limit = SpeedAlertService.speedLimitLiveData.value ?: 0
-            snippet = if (limit > 0) "Limită: $limit km/h" else "Limită necunoscută"
-        }
-        mapView.overlays.add(locationMarker)
-        
-        // Centrează harta pe poziția curentă
-        mapView.controller.animateTo(point)
-        mapView.invalidate()
+        mapWebView.evaluateJavascript("updateLocation($lat, $lon);", null)
     }
     
     private fun requestBatteryOptimizationExemption() {
@@ -120,9 +135,7 @@ class MainActivity : AppCompatActivity() {
                     val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
                     intent.data = Uri.parse("package:$packageName")
                     startActivity(intent)
-                } catch (e: Exception) {
-                    // Unele telefoane nu permit asta
-                }
+                } catch (e: Exception) { }
             }
         }
     }
@@ -185,7 +198,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startService() {
-        // Verifică permisiunea pentru overlay (bubble flotant)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
             Toast.makeText(this, "Permite afișarea peste alte aplicații pentru bubble!", Toast.LENGTH_LONG).show()
             val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
@@ -208,15 +220,5 @@ class MainActivity : AppCompatActivity() {
         stopService(intent)
         btnStart.isEnabled = true
         btnStop.isEnabled = false
-    }
-    
-    override fun onResume() {
-        super.onResume()
-        mapView.onResume()
-    }
-    
-    override fun onPause() {
-        super.onPause()
-        mapView.onPause()
     }
 }
