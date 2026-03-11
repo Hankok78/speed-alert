@@ -21,7 +21,6 @@ import android.util.Log
 import android.view.Gravity
 import android.view.WindowManager
 import android.widget.TextView
-import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.MutableLiveData
@@ -49,7 +48,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private var tts: TextToSpeech? = null
     private lateinit var locationManager: LocationManager
     private var wakeLock: PowerManager.WakeLock? = null
-    private var lastAnnouncedLimit = 0  // Ultima limită anunțată vocal
+    private var lastAnnouncedLimit = 0
     private var ttsReady = false
     private val serviceScope = CoroutineScope(Dispatchers.IO + Job())
     
@@ -60,15 +59,18 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private var cachedSpeedLimit = 0
     private var lastQueryLat = 0.0
     private var lastQueryLon = 0.0
+    private var lastBearing = 0f
+    private var limitUpdateTime = 0L  // Când a fost actualizată ultima limită
     
     private var windowManager: WindowManager? = null
     private var floatingBubble: TextView? = null
     private var isBubbleShowing = false
+    
+    // Flag pentru a aștepta limita nouă după viraj
+    private var waitingForNewLimit = false
 
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "Service onCreate")
-        
         tts = TextToSpeech(this, this)
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -85,7 +87,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "Service onStartCommand")
         startForeground(NOTIFICATION_ID, createNotification("Pornește..."))
         startLocationUpdates()
         statusLiveData.postValue("Activ")
@@ -93,7 +94,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     }
 
     override fun onInit(status: Int) {
-        Log.d(TAG, "TTS onInit status: $status")
         if (status == TextToSpeech.SUCCESS) {
             val result = tts?.setLanguage(Locale("ro", "RO"))
             if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
@@ -101,56 +101,34 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             }
             ttsReady = true
             tts?.setSpeechRate(1.0f)
-            Log.d(TAG, "TTS READY!")
             
-            // Anunț de pornire
             handler.postDelayed({
                 announceMessage("Avertizare viteză pornită")
             }, 1000)
-        } else {
-            Log.e(TAG, "TTS initialization failed!")
-            ttsReady = false
         }
     }
 
     private fun announceMessage(text: String) {
-        Log.d(TAG, "announceMessage: $text, ttsReady: $ttsReady")
         if (ttsReady && tts != null) {
-            val result = tts?.speak(text, TextToSpeech.QUEUE_ADD, null, "msg_${System.currentTimeMillis()}")
-            Log.d(TAG, "TTS speak result: $result")
-        } else {
-            Log.e(TAG, "TTS not ready or null!")
+            tts?.speak(text, TextToSpeech.QUEUE_ADD, null, "msg_${System.currentTimeMillis()}")
         }
     }
     
     private fun announceUrgent(text: String) {
-        Log.d(TAG, "announceUrgent: $text")
         if (ttsReady && tts != null) {
             tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "urgent_${System.currentTimeMillis()}")
         }
     }
 
     private fun startLocationUpdates() {
-        Log.d(TAG, "Starting location updates")
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) 
             == PackageManager.PERMISSION_GRANTED) {
             
             if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                 locationManager.requestLocationUpdates(
                     LocationManager.GPS_PROVIDER,
-                    500L,
-                    2f,
-                    this,
-                    Looper.getMainLooper()
-                )
-                Log.d(TAG, "GPS updates started")
-            }
-            
-            if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-                locationManager.requestLocationUpdates(
-                    LocationManager.NETWORK_PROVIDER,
-                    1000L,
-                    5f,
+                    300L,  // Mai rapid - 300ms
+                    1f,    // 1 metru
                     this,
                     Looper.getMainLooper()
                 )
@@ -158,15 +136,29 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             
             statusLiveData.postValue("GPS Activ")
         } else {
-            Log.e(TAG, "No location permission!")
             statusLiveData.postValue("Lipsă permisiune GPS")
         }
     }
 
     override fun onLocationChanged(location: Location) {
         val speedKmh = location.speed * 3.6f
+        val currentBearing = location.bearing
+        
         currentSpeedLiveData.postValue(speedKmh)
         locationLiveData.postValue(Pair(location.latitude, location.longitude))
+        
+        // Detectează viraj (schimbare de direcție > 30 grade)
+        val bearingChange = Math.abs(currentBearing - lastBearing)
+        val isTurning = bearingChange > 30 && bearingChange < 330 && lastBearing != 0f
+        
+        if (isTurning) {
+            Log.d(TAG, "VIRAJ DETECTAT! Bearing change: $bearingChange")
+            // Resetează - așteaptă limita nouă înainte de a avertiza
+            waitingForNewLimit = true
+            isCurrentlySpeeding = false
+            alreadyWarnedForThisZone = false
+        }
+        lastBearing = currentBearing
         
         updateNotification("Viteză: ${speedKmh.toInt()} km/h | Limită: ${if (cachedSpeedLimit > 0) cachedSpeedLimit else "?"}")
         updateFloatingBubble(speedKmh.toInt(), cachedSpeedLimit)
@@ -176,8 +168,8 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             Location.distanceBetween(lastQueryLat, lastQueryLon, location.latitude, location.longitude, distance)
         }
         
-        // Verifică la fiecare 20 metri sau dacă nu avem limită
-        val shouldQuery = distance[0] > 20 || cachedSpeedLimit <= 0 || lastQueryLat == 0.0
+        // Verifică mai des: la 10 metri SAU dacă am făcut viraj SAU nu avem limită
+        val shouldQuery = distance[0] > 10 || isTurning || cachedSpeedLimit <= 0 || lastQueryLat == 0.0
         
         if (shouldQuery) {
             lastQueryLat = location.latitude
@@ -186,41 +178,50 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             serviceScope.launch {
                 try {
                     val limit = getSpeedLimit(location.latitude, location.longitude)
-                    Log.d(TAG, "=== RESULT === limit: $limit, cached: $cachedSpeedLimit, lastAnnounced: $lastAnnouncedLimit")
                     
                     if (limit != null && limit > 0) {
-                        // Actualizează cache-ul
-                        val previousLimit = cachedSpeedLimit
+                        val oldLimit = cachedSpeedLimit
                         cachedSpeedLimit = limit
+                        limitUpdateTime = System.currentTimeMillis()
                         speedLimitLiveData.postValue(limit)
                         
-                        // ANUNȚĂ DACĂ E DIFERIT DE ULTIMA ANUNȚATĂ
+                        // Limita s-a schimbat - anunță!
                         if (limit != lastAnnouncedLimit) {
-                            Log.d(TAG, ">>> ANNOUNCING NEW LIMIT: $limit (was: $lastAnnouncedLimit)")
+                            Log.d(TAG, "LIMITĂ NOUĂ: $limit (era: $lastAnnouncedLimit)")
                             lastAnnouncedLimit = limit
                             isCurrentlySpeeding = false
                             alreadyWarnedForThisZone = false
+                            waitingForNewLimit = false  // Am primit limita nouă
                             
-                            // ANUNȚ VOCAL
                             withContext(Dispatchers.Main) {
-                                handler.post {
-                                    announceMessage("Atenție! Limită de $limit")
-                                }
+                                announceMessage("Atenție! Limită de $limit")
                             }
+                        } else {
+                            // Limita e aceeași - nu mai așteptăm
+                            waitingForNewLimit = false
                         }
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error in location changed: ${e.message}")
+                    Log.e(TAG, "Error: ${e.message}")
                 }
             }
         }
         
-        // Verifică depășirea
-        checkSpeedingAndWarn(speedKmh, cachedSpeedLimit)
+        // IMPORTANT: Nu avertiza pentru depășire dacă așteptăm limita nouă după viraj!
+        if (!waitingForNewLimit) {
+            checkSpeedingAndWarn(speedKmh, cachedSpeedLimit)
+        }
     }
     
     private fun checkSpeedingAndWarn(speedKmh: Float, limit: Int) {
         if (limit <= 0) return
+        
+        // Verifică dacă limita e proaspătă (sub 3 secunde)
+        val limitAge = System.currentTimeMillis() - limitUpdateTime
+        if (limitAge > 5000 && limitUpdateTime > 0) {
+            // Limita e veche - nu avertiza, așteaptă update
+            return
+        }
         
         val over = (speedKmh - limit).toInt()
         
@@ -246,72 +247,24 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     }
 
     private fun getSpeedLimit(lat: Double, lon: Double): Int? {
-        // Folosește TomTom Routing API pentru limite REALE
-        val limit = getSpeedLimitFromTomTomRouting(lat, lon)
-        if (limit != null && limit > 0) {
-            return limit
-        }
+        // TomTom Routing API - limite REALE
+        var limit = getSpeedLimitFromTomTomRouting(lat, lon)
+        if (limit != null && limit > 0) return limit
         
-        // Fallback la reverse geocode
-        val limit2 = getSpeedLimitFromTomTomGeocode(lat, lon)
-        if (limit2 != null && limit2 > 0) {
-            return limit2
-        }
+        // Fallback: TomTom Geocode
+        limit = getSpeedLimitFromTomTomGeocode(lat, lon)
+        if (limit != null && limit > 0) return limit
         
-        // Fallback la OSM
+        // Fallback: OSM
         return getSpeedLimitFromOSM(lat, lon)
     }
     
-    // TomTom Routing API - are limite de viteză REALE
     private fun getSpeedLimitFromTomTomRouting(lat: Double, lon: Double): Int? {
         return try {
             val tomtomKey = "4F7NveARkj9ilHALcjNgT0Sa4VUG01bA"
-            // Creează o rută scurtă de 50m pentru a obține limita
             val lat2 = lat + 0.0003
             val lon2 = lon + 0.0003
             val url = URL("https://api.tomtom.com/routing/1/calculateRoute/$lat,$lon:$lat2,$lon2/json?key=$tomtomKey&sectionType=speedLimit")
-            
-            val connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 4000
-            connection.readTimeout = 4000
-            
-            val response = connection.inputStream.bufferedReader().readText()
-            connection.disconnect()
-            
-            val json = JSONObject(response)
-            val routes = json.optJSONArray("routes")
-            
-            if (routes != null && routes.length() > 0) {
-                val route = routes.getJSONObject(0)
-                val sections = route.optJSONArray("sections")
-                
-                if (sections != null && sections.length() > 0) {
-                    // Prima secțiune cu limită de viteză
-                    for (i in 0 until sections.length()) {
-                        val section = sections.getJSONObject(i)
-                        val sectionType = section.optString("sectionType", "")
-                        if (sectionType == "SPEED_LIMIT") {
-                            val speedLimit = section.optInt("maxSpeedLimitInKmh", 0)
-                            if (speedLimit > 0) {
-                                Log.d(TAG, "TomTom Routing: limit = $speedLimit")
-                                return speedLimit
-                            }
-                        }
-                    }
-                }
-            }
-            null
-        } catch (e: Exception) {
-            Log.e(TAG, "TomTom Routing error: ${e.message}")
-            null
-        }
-    }
-    
-    private fun getSpeedLimitFromTomTomGeocode(lat: Double, lon: Double): Int? {
-        return try {
-            val tomtomKey = "4F7NveARkj9ilHALcjNgT0Sa4VUG01bA"
-            val url = URL("https://api.tomtom.com/search/2/reverseGeocode/$lat,$lon.json?key=$tomtomKey&returnSpeedLimit=true")
             
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
@@ -322,93 +275,89 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             connection.disconnect()
             
             val json = JSONObject(response)
-            val addresses = json.optJSONArray("addresses")
+            val routes = json.optJSONArray("routes")
             
-            if (addresses != null && addresses.length() > 0) {
-                val address = addresses.getJSONObject(0)
-                val addressInfo = address.optJSONObject("address")
-                
-                if (addressInfo != null) {
-                    val speedLimitStr = addressInfo.optString("speedLimit", "")
-                    if (speedLimitStr.isNotEmpty()) {
-                        val match = Regex("(\\d+)").find(speedLimitStr)
-                        if (match != null) {
-                            return match.groupValues[1].toInt()
+            if (routes != null && routes.length() > 0) {
+                val sections = routes.getJSONObject(0).optJSONArray("sections")
+                if (sections != null) {
+                    for (i in 0 until sections.length()) {
+                        val section = sections.getJSONObject(i)
+                        if (section.optString("sectionType") == "SPEED_LIMIT") {
+                            val speedLimit = section.optInt("maxSpeedLimitInKmh", 0)
+                            if (speedLimit > 0) return speedLimit
                         }
                     }
                 }
             }
             null
-        } catch (e: Exception) {
-            null
-        }
+        } catch (e: Exception) { null }
     }
     
-    private fun getSpeedLimitFromOSM(lat: Double, lon: Double): Int? {
+    private fun getSpeedLimitFromTomTomGeocode(lat: Double, lon: Double): Int? {
         return try {
-            val radius = 35
-            val query = "[out:json][timeout:5];way(around:$radius,$lat,$lon)[maxspeed];out tags;"
+            val tomtomKey = "4F7NveARkj9ilHALcjNgT0Sa4VUG01bA"
+            val url = URL("https://api.tomtom.com/search/2/reverseGeocode/$lat,$lon.json?key=$tomtomKey&returnSpeedLimit=true")
             
-            val url = URL("https://overpass-api.de/api/interpreter")
             val connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
-            connection.connectTimeout = 5000
-            connection.readTimeout = 5000
-            
-            val postData = "data=${URLEncoder.encode(query, "UTF-8")}"
-            connection.outputStream.write(postData.toByteArray())
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 2000
+            connection.readTimeout = 2000
             
             val response = connection.inputStream.bufferedReader().readText()
             connection.disconnect()
             
             val json = JSONObject(response)
-            val elements = json.optJSONArray("elements")
+            val addresses = json.optJSONArray("addresses")
             
-            if (elements != null && elements.length() > 0) {
-                for (i in 0 until elements.length()) {
-                    val element = elements.getJSONObject(i)
-                    val tags = element.optJSONObject("tags")
-                    if (tags != null) {
-                        val maxspeed = tags.optString("maxspeed", "")
-                        if (maxspeed.isNotEmpty()) {
-                            val match = Regex("(\\d+)").find(maxspeed)
-                            if (match != null) {
-                                return match.groupValues[1].toInt()
-                            }
-                        }
+            if (addresses != null && addresses.length() > 0) {
+                val addressInfo = addresses.getJSONObject(0).optJSONObject("address")
+                if (addressInfo != null) {
+                    val speedLimitStr = addressInfo.optString("speedLimit", "")
+                    if (speedLimitStr.isNotEmpty()) {
+                        val match = Regex("(\\d+)").find(speedLimitStr)
+                        if (match != null) return match.groupValues[1].toInt()
                     }
                 }
             }
             null
-        } catch (e: Exception) {
-            Log.e(TAG, "OSM error: ${e.message}")
+        } catch (e: Exception) { null }
+    }
+    
+    private fun getSpeedLimitFromOSM(lat: Double, lon: Double): Int? {
+        return try {
+            val query = "[out:json][timeout:3];way(around:25,$lat,$lon)[maxspeed];out tags;"
+            val url = URL("https://overpass-api.de/api/interpreter")
+            val connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "POST"
+            connection.doOutput = true
+            connection.connectTimeout = 3000
+            connection.readTimeout = 3000
+            
+            connection.outputStream.write("data=${URLEncoder.encode(query, "UTF-8")}".toByteArray())
+            val response = connection.inputStream.bufferedReader().readText()
+            connection.disconnect()
+            
+            val elements = JSONObject(response).optJSONArray("elements")
+            if (elements != null && elements.length() > 0) {
+                val tags = elements.getJSONObject(0).optJSONObject("tags")
+                val maxspeed = tags?.optString("maxspeed", "") ?: ""
+                val match = Regex("(\\d+)").find(maxspeed)
+                if (match != null) return match.groupValues[1].toInt()
+            }
             null
-        }
+        } catch (e: Exception) { null }
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Speed Alert",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "Avertizări limită de viteză"
-            }
-            
-            val notificationManager = getSystemService(NotificationManager::class.java)
-            notificationManager.createNotificationChannel(channel)
+            val channel = NotificationChannel(CHANNEL_ID, "Speed Alert", NotificationManager.IMPORTANCE_LOW)
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
     }
 
     private fun createNotification(content: String): Notification {
         val intent = Intent(this, MainActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(
-            this, 0, intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+        val pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Speed Alert")
@@ -420,14 +369,11 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     }
 
     private fun updateNotification(content: String) {
-        val notificationManager = getSystemService(NotificationManager::class.java)
-        notificationManager.notify(NOTIFICATION_ID, createNotification(content))
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, createNotification(content))
     }
     
     private fun createFloatingBubble() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
-            return
-        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) return
         
         try {
             floatingBubble = TextView(this).apply {
@@ -436,23 +382,17 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 setTextColor(Color.WHITE)
                 gravity = Gravity.CENTER
                 setPadding(20, 20, 20, 20)
-                
-                val shape = GradientDrawable()
-                shape.shape = GradientDrawable.OVAL
-                shape.setColor(Color.parseColor("#4CAF50"))
-                background = shape
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(Color.parseColor("#4CAF50"))
+                }
             }
             
             val params = WindowManager.LayoutParams(
-                130,
-                130,
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) 
-                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                else 
-                    WindowManager.LayoutParams.TYPE_PHONE,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                130, 130,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                else WindowManager.LayoutParams.TYPE_PHONE,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
                 PixelFormat.TRANSLUCENT
             )
             params.gravity = Gravity.TOP or Gravity.END
@@ -461,25 +401,21 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             
             windowManager?.addView(floatingBubble, params)
             isBubbleShowing = true
-        } catch (e: Exception) {
-            Log.e(TAG, "Bubble error: ${e.message}")
-        }
+        } catch (e: Exception) { }
     }
     
     private fun updateFloatingBubble(speed: Int, limit: Int) {
         handler.post {
             floatingBubble?.let { bubble ->
                 bubble.text = "$speed"
-                
-                val shape = bubble.background as? GradientDrawable
-                shape?.let {
+                (bubble.background as? GradientDrawable)?.setColor(
                     when {
-                        limit <= 0 -> it.setColor(Color.parseColor("#2196F3"))
-                        speed > limit + 5 -> it.setColor(Color.parseColor("#F44336"))
-                        speed > limit -> it.setColor(Color.parseColor("#FF9800"))
-                        else -> it.setColor(Color.parseColor("#4CAF50"))
+                        limit <= 0 -> Color.parseColor("#2196F3")
+                        speed > limit + 5 -> Color.parseColor("#F44336")
+                        speed > limit -> Color.parseColor("#FF9800")
+                        else -> Color.parseColor("#4CAF50")
                     }
-                }
+                )
             }
         }
     }
@@ -491,30 +427,20 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 floatingBubble = null
                 isBubbleShowing = false
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Remove bubble error: ${e.message}")
-        }
+        } catch (e: Exception) { }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
         super.onDestroy()
-        Log.d(TAG, "Service onDestroy")
         removeFloatingBubble()
         handler.removeCallbacksAndMessages(null)
         locationManager.removeUpdates(this)
         tts?.stop()
         tts?.shutdown()
-        tts = null
         serviceScope.cancel()
-        
-        wakeLock?.let {
-            if (it.isHeld) {
-                it.release()
-            }
-        }
-        
+        wakeLock?.let { if (it.isHeld) it.release() }
         statusLiveData.postValue("Oprit")
     }
 }
