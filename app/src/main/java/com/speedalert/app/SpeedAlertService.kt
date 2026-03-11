@@ -17,9 +17,11 @@ import android.os.Handler
 import android.os.PowerManager
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
+import android.util.Log
 import android.view.Gravity
 import android.view.WindowManager
 import android.widget.TextView
+import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.MutableLiveData
@@ -41,12 +43,13 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         
         private const val CHANNEL_ID = "SpeedAlertChannel"
         private const val NOTIFICATION_ID = 1
+        private const val TAG = "SpeedAlert"
     }
 
-    private lateinit var tts: TextToSpeech
+    private var tts: TextToSpeech? = null
     private lateinit var locationManager: LocationManager
     private var wakeLock: PowerManager.WakeLock? = null
-    private var lastSpeedLimit = -1
+    private var lastAnnouncedLimit = 0  // Ultima limită anunțată vocal
     private var ttsReady = false
     private val serviceScope = CoroutineScope(Dispatchers.IO + Job())
     
@@ -54,7 +57,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private var alreadyWarnedForThisZone = false
     private val handler = Handler(Looper.getMainLooper())
     
-    private var cachedSpeedLimit = -1
+    private var cachedSpeedLimit = 0
     private var lastQueryLat = 0.0
     private var lastQueryLon = 0.0
     
@@ -64,6 +67,8 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
 
     override fun onCreate() {
         super.onCreate()
+        Log.d(TAG, "Service onCreate")
+        
         tts = TextToSpeech(this, this)
         locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -80,6 +85,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.d(TAG, "Service onStartCommand")
         startForeground(NOTIFICATION_ID, createNotification("Pornește..."))
         startLocationUpdates()
         statusLiveData.postValue("Activ")
@@ -87,30 +93,45 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     }
 
     override fun onInit(status: Int) {
+        Log.d(TAG, "TTS onInit status: $status")
         if (status == TextToSpeech.SUCCESS) {
-            val result = tts.setLanguage(Locale("ro", "RO"))
+            val result = tts?.setLanguage(Locale("ro", "RO"))
             if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                tts.setLanguage(Locale.GERMAN)
+                tts?.setLanguage(Locale.GERMAN)
             }
             ttsReady = true
-            tts.setSpeechRate(1.0f)
-            speak("Avertizare viteză pornită")
+            tts?.setSpeechRate(1.0f)
+            Log.d(TAG, "TTS READY!")
+            
+            // Anunț de pornire
+            handler.postDelayed({
+                announceMessage("Avertizare viteză pornită")
+            }, 1000)
+        } else {
+            Log.e(TAG, "TTS initialization failed!")
+            ttsReady = false
         }
     }
 
-    private fun speak(text: String) {
-        if (ttsReady) {
-            tts.speak(text, TextToSpeech.QUEUE_ADD, null, "speedalert_${System.currentTimeMillis()}")
+    private fun announceMessage(text: String) {
+        Log.d(TAG, "announceMessage: $text, ttsReady: $ttsReady")
+        if (ttsReady && tts != null) {
+            val result = tts?.speak(text, TextToSpeech.QUEUE_ADD, null, "msg_${System.currentTimeMillis()}")
+            Log.d(TAG, "TTS speak result: $result")
+        } else {
+            Log.e(TAG, "TTS not ready or null!")
         }
     }
-
-    private fun speakUrgent(text: String) {
-        if (ttsReady) {
-            tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "speedalert_urgent")
+    
+    private fun announceUrgent(text: String) {
+        Log.d(TAG, "announceUrgent: $text")
+        if (ttsReady && tts != null) {
+            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "urgent_${System.currentTimeMillis()}")
         }
     }
 
     private fun startLocationUpdates() {
+        Log.d(TAG, "Starting location updates")
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) 
             == PackageManager.PERMISSION_GRANTED) {
             
@@ -122,6 +143,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                     this,
                     Looper.getMainLooper()
                 )
+                Log.d(TAG, "GPS updates started")
             }
             
             if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
@@ -136,6 +158,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             
             statusLiveData.postValue("GPS Activ")
         } else {
+            Log.e(TAG, "No location permission!")
             statusLiveData.postValue("Lipsă permisiune GPS")
         }
     }
@@ -143,7 +166,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     override fun onLocationChanged(location: Location) {
         val speedKmh = location.speed * 3.6f
         currentSpeedLiveData.postValue(speedKmh)
-        
         locationLiveData.postValue(Pair(location.latitude, location.longitude))
         
         updateNotification("Viteză: ${speedKmh.toInt()} km/h | Limită: ${if (cachedSpeedLimit > 0) cachedSpeedLimit else "?"}")
@@ -154,32 +176,40 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             Location.distanceBetween(lastQueryLat, lastQueryLon, location.latitude, location.longitude, distance)
         }
         
-        if (distance[0] > 15 || cachedSpeedLimit < 0 || lastQueryLat == 0.0) {
+        // Verifică la fiecare 15 metri
+        if (distance[0] > 15 || cachedSpeedLimit <= 0 || lastQueryLat == 0.0) {
             lastQueryLat = location.latitude
             lastQueryLon = location.longitude
             
             serviceScope.launch {
-                val limit = getSpeedLimit(location.latitude, location.longitude)
-                if (limit != null && limit > 0) {
-                    val oldLimit = cachedSpeedLimit
-                    cachedSpeedLimit = limit
-                    speedLimitLiveData.postValue(limit)
+                try {
+                    val limit = getSpeedLimit(location.latitude, location.longitude)
+                    Log.d(TAG, "Got speed limit: $limit (cached: $cachedSpeedLimit, lastAnnounced: $lastAnnouncedLimit)")
                     
-                    // ANUNȚĂ SCHIMBAREA LIMITEI - ÎNTOTDEAUNA!
-                    if (lastSpeedLimit != limit) {
-                        lastSpeedLimit = limit
-                        isCurrentlySpeeding = false
-                        alreadyWarnedForThisZone = false
+                    if (limit != null && limit > 0) {
+                        cachedSpeedLimit = limit
+                        speedLimitLiveData.postValue(limit)
                         
-                        // ANUNȚ VOCAL PENTRU SCHIMBARE LIMITĂ
-                        withContext(Dispatchers.Main) {
-                            speak("Atenție! Limită de $limit")
+                        // ANUNȚĂ DACĂ LIMITA S-A SCHIMBAT
+                        if (limit != lastAnnouncedLimit) {
+                            Log.d(TAG, "Speed limit changed! Announcing: $limit")
+                            lastAnnouncedLimit = limit
+                            isCurrentlySpeeding = false
+                            alreadyWarnedForThisZone = false
+                            
+                            // ANUNȚ VOCAL PE MAIN THREAD
+                            withContext(Dispatchers.Main) {
+                                announceMessage("Atenție! Limită de $limit")
+                            }
                         }
                     }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error getting speed limit: ${e.message}")
                 }
             }
         }
         
+        // Verifică depășirea
         checkSpeedingAndWarn(speedKmh, cachedSpeedLimit)
     }
     
@@ -192,20 +222,19 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             if (!alreadyWarnedForThisZone) {
                 alreadyWarnedForThisZone = true
                 isCurrentlySpeeding = true
-                speakUrgent("Boule! Încetinește că iei amendă!")
+                announceUrgent("Boule! Încetinește că iei amendă!")
                 updateNotification("⚠️ DEPĂȘIRE! ${speedKmh.toInt()} / $limit km/h")
             }
         } else if (over > 3) {
             if (!isCurrentlySpeeding) {
                 isCurrentlySpeeding = true
-                speak("Ai depășit limita cu $over kilometri")
+                announceMessage("Ai depășit limita cu $over kilometri")
                 updateNotification("⚠️ ${speedKmh.toInt()} / $limit km/h")
             }
         } else {
             if (isCurrentlySpeeding || alreadyWarnedForThisZone) {
                 isCurrentlySpeeding = false
                 alreadyWarnedForThisZone = false
-                handler.removeCallbacksAndMessages(null)
             }
         }
     }
@@ -214,6 +243,8 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         return try {
             val tomtomKey = "4F7NveARkj9ilHALcjNgT0Sa4VUG01bA"
             val url = URL("https://api.tomtom.com/search/2/reverseGeocode/$lat,$lon.json?key=$tomtomKey&returnSpeedLimit=true")
+            
+            Log.d(TAG, "Querying TomTom: $lat, $lon")
             
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
@@ -232,18 +263,23 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 
                 if (addressInfo != null) {
                     val speedLimitStr = addressInfo.optString("speedLimit", "")
+                    Log.d(TAG, "TomTom speedLimit: $speedLimitStr")
+                    
                     if (speedLimitStr.isNotEmpty()) {
                         val match = Regex("(\\d+)").find(speedLimitStr)
                         if (match != null) {
-                            return match.groupValues[1].toInt()
+                            val limit = match.groupValues[1].toInt()
+                            Log.d(TAG, "Parsed limit: $limit")
+                            return limit
                         }
                     }
                 }
             }
             
+            Log.d(TAG, "TomTom returned no limit, trying OSM")
             getSpeedLimitFromOSM(lat, lon)
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "TomTom error: ${e.message}")
             getSpeedLimitFromOSM(lat, lon)
         }
     }
@@ -251,11 +287,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private fun getSpeedLimitFromOSM(lat: Double, lon: Double): Int? {
         return try {
             val radius = 35
-            val query = """
-                [out:json][timeout:5];
-                way(around:$radius,$lat,$lon)["maxspeed"];
-                out tags;
-            """.trimIndent()
+            val query = "[out:json][timeout:5];way(around:$radius,$lat,$lon)[maxspeed];out tags;"
             
             val url = URL("https://overpass-api.de/api/interpreter")
             val connection = url.openConnection() as HttpURLConnection
@@ -291,7 +323,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             }
             null
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "OSM error: ${e.message}")
             null
         }
     }
@@ -370,7 +402,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             windowManager?.addView(floatingBubble, params)
             isBubbleShowing = true
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Bubble error: ${e.message}")
         }
     }
     
@@ -400,7 +432,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 isBubbleShowing = false
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "Remove bubble error: ${e.message}")
         }
     }
 
@@ -408,11 +440,13 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
 
     override fun onDestroy() {
         super.onDestroy()
+        Log.d(TAG, "Service onDestroy")
         removeFloatingBubble()
         handler.removeCallbacksAndMessages(null)
         locationManager.removeUpdates(this)
-        tts.stop()
-        tts.shutdown()
+        tts?.stop()
+        tts?.shutdown()
+        tts = null
         serviceScope.cancel()
         
         wakeLock?.let {
