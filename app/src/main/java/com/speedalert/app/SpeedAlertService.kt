@@ -62,7 +62,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private var lastBearing = 0f
     private var limitUpdateTime = 0L
     
-    // Fereastra de stabilizare: din ultimele 5 citiri, 3 la fel = confirmat
+    // Stabilizare limită - fereastra: 3 din 5 citiri la fel = confirmat
     private val recentLimits = mutableListOf<Int>()
     private val WINDOW_SIZE = 5
     private val MIN_MATCH = 3
@@ -161,7 +161,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             waitingForNewLimit = true
             isCurrentlySpeeding = false
             alreadyWarnedForThisZone = false
-            warnedOnce = false
             recentLimits.clear()
         }
         lastBearing = currentBearing
@@ -183,58 +182,37 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             
             serviceScope.launch {
                 try {
-                    val limit = getSpeedLimit(location.latitude, location.longitude, currentBearing, waitingForNewLimit)
+                    val limit = getSpeedLimit(location.latitude, location.longitude)
                     
                     if (limit != null && limit > 0) {
                         limitUpdateTime = System.currentTimeMillis()
                         
-                        if (waitingForNewLimit) {
-                            // DUPA VIRAJ: accepta IMEDIAT
-                            if (limit != lastAnnouncedLimit) {
-                                Log.d(TAG, "LIMITA DUPA VIRAJ: $limit (era: $lastAnnouncedLimit)")
-                                cachedSpeedLimit = limit
-                                speedLimitLiveData.postValue(limit)
-                                lastAnnouncedLimit = limit
-                                isCurrentlySpeeding = false
-                                alreadyWarnedForThisZone = false
-                                warnedOnce = false
-                                waitingForNewLimit = false
-                                recentLimits.clear()
-                                
-                                withContext(Dispatchers.Main) {
-                                    announceMessage("Atenție! Limită de $limit")
-                                }
-                            } else {
-                                cachedSpeedLimit = limit
-                                waitingForNewLimit = false
-                            }
-                        } else {
-                            // DRUM DREPT: fereastra 5 citiri, 3 la fel = confirmat
-                            recentLimits.add(limit)
-                            if (recentLimits.size > WINDOW_SIZE) recentLimits.removeAt(0)
+                        // FEREASTRA: din ultimele 5 citiri, 3 la fel = confirmat
+                        recentLimits.add(limit)
+                        if (recentLimits.size > WINDOW_SIZE) recentLimits.removeAt(0)
+                        
+                        val counts = recentLimits.groupBy { it }
+                        val best = counts.maxByOrNull { it.value.size }
+                        
+                        if (best != null && best.value.size >= MIN_MATCH && best.key != lastAnnouncedLimit) {
+                            val newLimit = best.key
+                            Log.d(TAG, "LIMITĂ CONFIRMATĂ: $newLimit (era: $lastAnnouncedLimit, fereastra: $recentLimits)")
                             
-                            // Gaseste limita cu cele mai multe aparitii
-                            val counts = recentLimits.groupBy { it }
-                            val best = counts.maxByOrNull { it.value.size }
+                            cachedSpeedLimit = newLimit
+                            speedLimitLiveData.postValue(newLimit)
+                            lastAnnouncedLimit = newLimit
+                            isCurrentlySpeeding = false
+                            alreadyWarnedForThisZone = false
+                            warnedOnce = false
+                            waitingForNewLimit = false
+                            recentLimits.clear()
                             
-                            if (best != null && best.value.size >= MIN_MATCH && best.key != lastAnnouncedLimit) {
-                                val newLimit = best.key
-                                Log.d(TAG, "LIMITA CONFIRMATA: $newLimit (era: $lastAnnouncedLimit, fereastra: $recentLimits)")
-                                
-                                cachedSpeedLimit = newLimit
-                                speedLimitLiveData.postValue(newLimit)
-                                lastAnnouncedLimit = newLimit
-                                isCurrentlySpeeding = false
-                                alreadyWarnedForThisZone = false
-                                warnedOnce = false
-                                recentLimits.clear()
-                                
-                                withContext(Dispatchers.Main) {
-                                    announceMessage("Atenție! Limită de $newLimit")
-                                }
-                            } else if (limit == lastAnnouncedLimit) {
-                                cachedSpeedLimit = limit
+                            withContext(Dispatchers.Main) {
+                                announceMessage("Atenție! Limită de $newLimit")
                             }
+                        } else if (limit == lastAnnouncedLimit) {
+                            cachedSpeedLimit = limit
+                            waitingForNewLimit = false
                         }
                     }
                 } catch (e: Exception) {
@@ -304,51 +282,30 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         }
     }
 
-    private fun getSpeedLimit(lat: Double, lon: Double, bearing: Float, afterTurn: Boolean): Int? {
-        if (afterTurn) {
-            // DUPA VIRAJ: Reverse Geocode = citeste drumul EXACT unde esti (fara offset)
-            var limit = getSpeedLimitFromTomTomGeocode(lat, lon)
-            if (limit != null && limit > 0) return limit
-            // Fallback la routing
-            limit = getSpeedLimitFromTomTomRouting(lat, lon, bearing)
-            if (limit != null && limit > 0) return limit
-        } else {
-            // DRUM DREPT: Routing cu bearing = urmareste drumul tau
-            var limit = getSpeedLimitFromTomTomRouting(lat, lon, bearing)
-            if (limit != null && limit > 0) return limit
-            // Fallback la geocode
-            limit = getSpeedLimitFromTomTomGeocode(lat, lon)
-            if (limit != null && limit > 0) return limit
-        }
-        // Fallback final: OSM
+    private fun getSpeedLimit(lat: Double, lon: Double): Int? {
+        // TomTom Routing API - limite REALE
+        var limit = getSpeedLimitFromTomTomRouting(lat, lon)
+        if (limit != null && limit > 0) return limit
+        
+        // Fallback: TomTom Geocode
+        limit = getSpeedLimitFromTomTomGeocode(lat, lon)
+        if (limit != null && limit > 0) return limit
+        
+        // Fallback: OSM
         return getSpeedLimitFromOSM(lat, lon)
     }
     
-    private fun getSpeedLimitFromTomTomRouting(lat: Double, lon: Double, bearing: Float): Int? {
+    private fun getSpeedLimitFromTomTomRouting(lat: Double, lon: Double): Int? {
         return try {
             val tomtomKey = "4F7NveARkj9ilHALcjNgT0Sa4VUG01bA"
-            
-            val lat2: Double
-            val lon2: Double
-            
-            if (bearing > 0.1f) {
-                // Avem bearing valid - punct inainte in directia de mers
-                val d = 0.0005 // ~50m inainte
-                val bearingRad = Math.toRadians(bearing.toDouble())
-                lat2 = lat + d * Math.cos(bearingRad)
-                lon2 = lon + d * Math.sin(bearingRad) / Math.cos(Math.toRadians(lat))
-            } else {
-                // Bearing 0 = nesigur - offset mic NE (functioneaza ok)
-                lat2 = lat + 0.0003
-                lon2 = lon + 0.0003
-            }
-            
-            val url = URL("https://api.tomtom.com/routing/1/calculateRoute/$lat,$lon:$lat2,$lon2/json?key=$tomtomKey&sectionType=speedLimit&routeType=fastest&travelMode=car")
+            val lat2 = lat + 0.0003
+            val lon2 = lon + 0.0003
+            val url = URL("https://api.tomtom.com/routing/1/calculateRoute/$lat,$lon:$lat2,$lon2/json?key=$tomtomKey&sectionType=speedLimit")
             
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
-            connection.connectTimeout = 4000
-            connection.readTimeout = 4000
+            connection.connectTimeout = 3000
+            connection.readTimeout = 3000
             
             val response = connection.inputStream.bufferedReader().readText()
             connection.disconnect()
@@ -359,20 +316,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             if (routes != null && routes.length() > 0) {
                 val sections = routes.getJSONObject(0).optJSONArray("sections")
                 if (sections != null) {
-                    // Cauta sectiunea care acopera punctul de start (index 0)
-                    for (i in 0 until sections.length()) {
-                        val section = sections.getJSONObject(i)
-                        if (section.optString("sectionType") == "SPEED_LIMIT") {
-                            val speedLimit = section.optInt("maxSpeedLimitInKmh", 0)
-                            val startIdx = section.optInt("startPointIndex", -1)
-                            // Preferam sectiunea de la start (drumul nostru)
-                            if (speedLimit > 0 && startIdx <= 1) {
-                                Log.d(TAG, "TomTom Routing: $speedLimit km/h (start=$startIdx)")
-                                return speedLimit
-                            }
-                        }
-                    }
-                    // Daca nu am gasit la start, ia prima limita gasita
                     for (i in 0 until sections.length()) {
                         val section = sections.getJSONObject(i)
                         if (section.optString("sectionType") == "SPEED_LIMIT") {
@@ -383,10 +326,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 }
             }
             null
-        } catch (e: Exception) {
-            Log.e(TAG, "Routing error: ${e.message}")
-            null
-        }
+        } catch (e: Exception) { null }
     }
     
     private fun getSpeedLimitFromTomTomGeocode(lat: Double, lon: Double): Int? {
@@ -396,8 +336,8 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
-            connection.connectTimeout = 4000
-            connection.readTimeout = 4000
+            connection.connectTimeout = 2000
+            connection.readTimeout = 2000
             
             val response = connection.inputStream.bufferedReader().readText()
             connection.disconnect()
@@ -411,25 +351,17 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                     val speedLimitStr = addressInfo.optString("speedLimit", "")
                     if (speedLimitStr.isNotEmpty()) {
                         val match = Regex("(\\d+)").find(speedLimitStr)
-                        if (match != null) {
-                            val limit = match.groupValues[1].toInt()
-                            Log.d(TAG, "TomTom Geocode: $limit km/h")
-                            return limit
-                        }
+                        if (match != null) return match.groupValues[1].toInt()
                     }
                 }
             }
             null
-        } catch (e: Exception) {
-            Log.e(TAG, "Geocode error: ${e.message}")
-            null
-        }
+        } catch (e: Exception) { null }
     }
     
     private fun getSpeedLimitFromOSM(lat: Double, lon: Double): Int? {
         return try {
-            // Cauta si maxspeed:conditional pentru limite cu orar
-            val query = "[out:json][timeout:3];way(around:25,$lat,$lon)[\"maxspeed\"];out tags;"
+            val query = "[out:json][timeout:3];way(around:25,$lat,$lon)[maxspeed];out tags;"
             val url = URL("https://overpass-api.de/api/interpreter")
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "POST"
@@ -444,67 +376,12 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             val elements = JSONObject(response).optJSONArray("elements")
             if (elements != null && elements.length() > 0) {
                 val tags = elements.getJSONObject(0).optJSONObject("tags")
-                if (tags != null) {
-                    // Verifica mai intai limita conditionala (cu orar)
-                    val conditional = tags.optString("maxspeed:conditional", "")
-                    if (conditional.isNotEmpty()) {
-                        val timeLimit = parseConditionalSpeed(conditional)
-                        if (timeLimit != null) return timeLimit
-                    }
-                    
-                    // Limita normala
-                    val maxspeed = tags.optString("maxspeed", "")
-                    val match = Regex("(\\d+)").find(maxspeed)
-                    if (match != null) return match.groupValues[1].toInt()
-                }
+                val maxspeed = tags?.optString("maxspeed", "") ?: ""
+                val match = Regex("(\\d+)").find(maxspeed)
+                if (match != null) return match.groupValues[1].toInt()
             }
             null
         } catch (e: Exception) { null }
-    }
-    
-    // Parseaza limite cu orar: "30 @ (Mo-Fr 07:00-18:30)" sau "30 @ (07:00-18:30)"
-    private fun parseConditionalSpeed(conditional: String): Int? {
-        try {
-            // Format: "SPEED @ (CONDITIE)" sau "SPEED @ (Mo-Fr HH:MM-HH:MM)"
-            val parts = conditional.split("@")
-            if (parts.size < 2) return null
-            
-            val speedStr = parts[0].trim()
-            val condition = parts[1].trim()
-            
-            val speedMatch = Regex("(\\d+)").find(speedStr)
-            if (speedMatch == null) return null
-            val conditionalSpeed = speedMatch.groupValues[1].toInt()
-            
-            // Extrage orele din conditie
-            val timeMatch = Regex("(\\d{1,2}):(\\d{2})\\s*-\\s*(\\d{1,2}):(\\d{2})").find(condition)
-            if (timeMatch != null) {
-                val startHour = timeMatch.groupValues[1].toInt()
-                val startMin = timeMatch.groupValues[2].toInt()
-                val endHour = timeMatch.groupValues[3].toInt()
-                val endMin = timeMatch.groupValues[4].toInt()
-                
-                val cal = Calendar.getInstance()
-                val nowHour = cal.get(Calendar.HOUR_OF_DAY)
-                val nowMin = cal.get(Calendar.MINUTE)
-                val nowTotal = nowHour * 60 + nowMin
-                val startTotal = startHour * 60 + startMin
-                val endTotal = endHour * 60 + endMin
-                
-                Log.d(TAG, "Limita conditionala: $conditionalSpeed km/h intre $startHour:$startMin-$endHour:$endMin, acum: $nowHour:$nowMin")
-                
-                if (nowTotal in startTotal..endTotal) {
-                    // Suntem in intervalul orar -> aplica limita conditionala
-                    return conditionalSpeed
-                }
-                // In afara intervalului -> nu aplica (va folosi limita normala)
-                return null
-            }
-            
-            return null
-        } catch (e: Exception) {
-            return null
-        }
     }
 
     private fun createNotificationChannel() {
