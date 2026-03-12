@@ -62,10 +62,11 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private var lastBearing = 0f
     private var limitUpdateTime = 0L
     
-    // Stabilizare limită - anunță doar când e confirmată
+    // Stabilizare limită
     private var pendingLimit = 0
     private var pendingLimitCount = 0
-    private val CONFIRMATIONS_NEEDED = 3  // Trebuie 3 citiri la fel pentru a confirma
+    private val CONFIRMATIONS_AFTER_TURN = 2   // Dupa viraj: 2 citiri la fel
+    private val CONFIRMATIONS_STRAIGHT = 6     // Pe drum drept: 6 citiri (ignora strazi laterale)
     
     private var windowManager: WindowManager? = null
     private var floatingBubble: TextView? = null
@@ -158,10 +159,13 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         
         if (isTurning) {
             Log.d(TAG, "VIRAJ DETECTAT! Bearing change: $bearingChange")
-            // Resetează - așteaptă limita nouă înainte de a avertiza
+            // Resetează complet - așteaptă limita nouă de pe strada nouă
             waitingForNewLimit = true
             isCurrentlySpeeding = false
             alreadyWarnedForThisZone = false
+            warnedOnce = false
+            pendingLimit = 0
+            pendingLimitCount = 0
         }
         lastBearing = currentBearing
         
@@ -187,22 +191,21 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                     if (limit != null && limit > 0) {
                         limitUpdateTime = System.currentTimeMillis()
                         
-                        // STABILIZARE: Așteaptă 3 citiri la fel înainte de a anunța
+                        // STABILIZARE
                         if (limit == pendingLimit) {
                             pendingLimitCount++
                         } else {
-                            // Limită nouă - începe numărătoarea
                             pendingLimit = limit
                             pendingLimitCount = 1
                         }
                         
-                        // Anunță DOAR dacă avem 3 citiri consecutive la fel
-                        // SAU dacă e o schimbare MARE (diferență > 30 km/h) - probabil viraj
-                        val bigChange = Math.abs(limit - lastAnnouncedLimit) >= 30
-                        val confirmed = pendingLimitCount >= CONFIRMATIONS_NEEDED
+                        // Dupa viraj: accepta rapid (2 confirmari)
+                        // Pe drum drept: accepta greu (6 confirmari) - ignora strazi laterale
+                        val neededConfirmations = if (waitingForNewLimit) CONFIRMATIONS_AFTER_TURN else CONFIRMATIONS_STRAIGHT
+                        val confirmed = pendingLimitCount >= neededConfirmations
                         
-                        if ((confirmed || bigChange) && limit != lastAnnouncedLimit) {
-                            Log.d(TAG, "LIMITĂ CONFIRMATĂ: $limit (era: $lastAnnouncedLimit, citiri: $pendingLimitCount)")
+                        if (confirmed && limit != lastAnnouncedLimit) {
+                            Log.d(TAG, "LIMITĂ CONFIRMATĂ: $limit (era: $lastAnnouncedLimit, citiri: $pendingLimitCount, dupa_viraj: $waitingForNewLimit)")
                             
                             cachedSpeedLimit = limit
                             speedLimitLiveData.postValue(limit)
@@ -217,11 +220,9 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                                 announceMessage("Atenție! Limită de $limit")
                             }
                         } else if (limit == lastAnnouncedLimit) {
-                            // Limita e aceeași ca cea anunțată - OK
                             cachedSpeedLimit = limit
                             waitingForNewLimit = false
                         }
-                        // Altfel, nu face nimic - așteaptă mai multe confirmări
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error: ${e.message}")
@@ -372,7 +373,8 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     
     private fun getSpeedLimitFromOSM(lat: Double, lon: Double): Int? {
         return try {
-            val query = "[out:json][timeout:3];way(around:25,$lat,$lon)[maxspeed];out tags;"
+            // Cauta si maxspeed:conditional pentru limite cu orar
+            val query = "[out:json][timeout:3];way(around:25,$lat,$lon)[\"maxspeed\"];out tags;"
             val url = URL("https://overpass-api.de/api/interpreter")
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "POST"
@@ -387,12 +389,67 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             val elements = JSONObject(response).optJSONArray("elements")
             if (elements != null && elements.length() > 0) {
                 val tags = elements.getJSONObject(0).optJSONObject("tags")
-                val maxspeed = tags?.optString("maxspeed", "") ?: ""
-                val match = Regex("(\\d+)").find(maxspeed)
-                if (match != null) return match.groupValues[1].toInt()
+                if (tags != null) {
+                    // Verifica mai intai limita conditionala (cu orar)
+                    val conditional = tags.optString("maxspeed:conditional", "")
+                    if (conditional.isNotEmpty()) {
+                        val timeLimit = parseConditionalSpeed(conditional)
+                        if (timeLimit != null) return timeLimit
+                    }
+                    
+                    // Limita normala
+                    val maxspeed = tags.optString("maxspeed", "")
+                    val match = Regex("(\\d+)").find(maxspeed)
+                    if (match != null) return match.groupValues[1].toInt()
+                }
             }
             null
         } catch (e: Exception) { null }
+    }
+    
+    // Parseaza limite cu orar: "30 @ (Mo-Fr 07:00-18:30)" sau "30 @ (07:00-18:30)"
+    private fun parseConditionalSpeed(conditional: String): Int? {
+        try {
+            // Format: "SPEED @ (CONDITIE)" sau "SPEED @ (Mo-Fr HH:MM-HH:MM)"
+            val parts = conditional.split("@")
+            if (parts.size < 2) return null
+            
+            val speedStr = parts[0].trim()
+            val condition = parts[1].trim()
+            
+            val speedMatch = Regex("(\\d+)").find(speedStr)
+            if (speedMatch == null) return null
+            val conditionalSpeed = speedMatch.groupValues[1].toInt()
+            
+            // Extrage orele din conditie
+            val timeMatch = Regex("(\\d{1,2}):(\\d{2})\\s*-\\s*(\\d{1,2}):(\\d{2})").find(condition)
+            if (timeMatch != null) {
+                val startHour = timeMatch.groupValues[1].toInt()
+                val startMin = timeMatch.groupValues[2].toInt()
+                val endHour = timeMatch.groupValues[3].toInt()
+                val endMin = timeMatch.groupValues[4].toInt()
+                
+                val cal = Calendar.getInstance()
+                val nowHour = cal.get(Calendar.HOUR_OF_DAY)
+                val nowMin = cal.get(Calendar.MINUTE)
+                val nowTotal = nowHour * 60 + nowMin
+                val startTotal = startHour * 60 + startMin
+                val endTotal = endHour * 60 + endMin
+                
+                Log.d(TAG, "Limita conditionala: $conditionalSpeed km/h intre $startHour:$startMin-$endHour:$endMin, acum: $nowHour:$nowMin")
+                
+                if (nowTotal in startTotal..endTotal) {
+                    // Suntem in intervalul orar -> aplica limita conditionala
+                    return conditionalSpeed
+                }
+                // In afara intervalului -> nu aplica (va folosi limita normala)
+                return null
+            }
+            
+            return null
+        } catch (e: Exception) {
+            return null
+        }
     }
 
     private fun createNotificationChannel() {
