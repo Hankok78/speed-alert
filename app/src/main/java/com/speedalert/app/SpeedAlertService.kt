@@ -320,26 +320,26 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     // null = nu s-a putut determina
     
     private fun getSpeedLimit(lat: Double, lon: Double, bearing: Float): Int? {
-        // Pasul 1: Detecteaza tipul drumului via TomTom Reverse Geocode
+        // PASUL 1: TomTom Routing API (sursa principala - functioneaza cel mai bine pe drumuri normale)
+        val routingLimit = getSpeedLimitFromTomTomRouting(lat, lon)
+        if (routingLimit != null && routingLimit > 0) return routingLimit
+        
+        // PASUL 2: Routing n-a gasit limita -> verifica daca suntem pe autostrada
         val roadInfo = getRoadInfo(lat, lon)
         
         if (roadInfo.isHighway) {
             Log.d(TAG, "PE AUTOSTRADA: ${roadInfo.roadName}")
-            // Pasul 2: Pe autostrada - foloseste routing cu bearing
-            val routingLimit = getHighwaySpeedLimit(lat, lon, bearing)
-            if (routingLimit != null && routingLimit > 0) return routingLimit
-            // Daca routing-ul nu gaseste limita pe autostrada -> FARA LIMITA
+            // Incearca si routing cu bearing pe autostrada
+            val hwLimit = getHighwaySpeedLimit(lat, lon, bearing)
+            if (hwLimit != null && hwLimit > 0) return hwLimit
+            // Pe autostrada fara limita -> FARA LIMITA
             return -1
         }
         
-        // Pe drum normal - foloseste speedLimit din reverse geocode
+        // PASUL 3: Nu suntem pe autostrada - foloseste speedLimit din reverse geocode ca fallback
         if (roadInfo.speedLimit > 0) return roadInfo.speedLimit
         
-        // Fallback: TomTom Routing
-        val routingLimit = getSpeedLimitFromTomTomRouting(lat, lon, bearing)
-        if (routingLimit != null && routingLimit > 0) return routingLimit
-        
-        // Fallback: OSM
+        // PASUL 4: Fallback final - OSM
         return getSpeedLimitFromOSM(lat, lon)
     }
     
@@ -466,17 +466,13 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         }
     }
     
-    private fun getSpeedLimitFromTomTomRouting(lat: Double, lon: Double, bearing: Float): Int? {
+    private fun getSpeedLimitFromTomTomRouting(lat: Double, lon: Double): Int? {
         return try {
             val tomtomKey = "4F7NveARkj9ilHALcjNgT0Sa4VUG01bA"
-            
-            // Proiecteaza al doilea punct in directia de mers
-            val distance = 0.002 // ~200m
-            val bearingRad = Math.toRadians(bearing.toDouble())
-            val lat2 = lat + distance * Math.cos(bearingRad)
-            val lon2 = lon + distance * Math.sin(bearingRad) / Math.cos(Math.toRadians(lat))
-            
-            val url = URL("https://api.tomtom.com/routing/1/calculateRoute/$lat,$lon:$lat2,$lon2/json?key=$tomtomKey&sectionType=speedLimit&routeType=fastest&travelMode=car")
+            // Offset mic (~30m) - functioneaza bine pe drumuri normale
+            val lat2 = lat + 0.0003
+            val lon2 = lon + 0.0003
+            val url = URL("https://api.tomtom.com/routing/1/calculateRoute/$lat,$lon:$lat2,$lon2/json?key=$tomtomKey&sectionType=speedLimit")
             
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
