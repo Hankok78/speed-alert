@@ -183,7 +183,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             
             serviceScope.launch {
                 try {
-                    val limit = getSpeedLimit(location.latitude, location.longitude, currentBearing)
+                    val limit = getSpeedLimit(location.latitude, location.longitude, currentBearing, waitingForNewLimit)
                     
                     if (limit != null && limit > 0) {
                         limitUpdateTime = System.currentTimeMillis()
@@ -304,16 +304,23 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         }
     }
 
-    private fun getSpeedLimit(lat: Double, lon: Double, bearing: Float): Int? {
-        // TomTom Routing API - limite REALE
-        var limit = getSpeedLimitFromTomTomRouting(lat, lon, bearing)
-        if (limit != null && limit > 0) return limit
-        
-        // Fallback: TomTom Geocode
-        limit = getSpeedLimitFromTomTomGeocode(lat, lon)
-        if (limit != null && limit > 0) return limit
-        
-        // Fallback: OSM
+    private fun getSpeedLimit(lat: Double, lon: Double, bearing: Float, afterTurn: Boolean): Int? {
+        if (afterTurn) {
+            // DUPA VIRAJ: Reverse Geocode = citeste drumul EXACT unde esti (fara offset)
+            var limit = getSpeedLimitFromTomTomGeocode(lat, lon)
+            if (limit != null && limit > 0) return limit
+            // Fallback la routing
+            limit = getSpeedLimitFromTomTomRouting(lat, lon, bearing)
+            if (limit != null && limit > 0) return limit
+        } else {
+            // DRUM DREPT: Routing cu bearing = urmareste drumul tau
+            var limit = getSpeedLimitFromTomTomRouting(lat, lon, bearing)
+            if (limit != null && limit > 0) return limit
+            // Fallback la geocode
+            limit = getSpeedLimitFromTomTomGeocode(lat, lon)
+            if (limit != null && limit > 0) return limit
+        }
+        // Fallback final: OSM
         return getSpeedLimitFromOSM(lat, lon)
     }
     
