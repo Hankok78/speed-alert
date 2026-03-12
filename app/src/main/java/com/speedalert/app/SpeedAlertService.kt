@@ -62,11 +62,10 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private var lastBearing = 0f
     private var limitUpdateTime = 0L
     
-    // Stabilizare limită
+    // Stabilizare limită - 3 citiri la fel inainte de anunt
     private var pendingLimit = 0
     private var pendingLimitCount = 0
-    private val CONFIRMATIONS_AFTER_TURN = 2   // Dupa viraj: 2 citiri la fel
-    private val CONFIRMATIONS_STRAIGHT = 6     // Pe drum drept: 6 citiri (ignora strazi laterale)
+    private val CONFIRMATIONS_NEEDED = 3
     
     private var windowManager: WindowManager? = null
     private var floatingBubble: TextView? = null
@@ -199,10 +198,8 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                             pendingLimitCount = 1
                         }
                         
-                        // Dupa viraj: accepta rapid (2 confirmari)
-                        // Pe drum drept: accepta greu (6 confirmari) - ignora strazi laterale
-                        val neededConfirmations = if (waitingForNewLimit) CONFIRMATIONS_AFTER_TURN else CONFIRMATIONS_STRAIGHT
-                        val confirmed = pendingLimitCount >= neededConfirmations
+                        // 3 citiri consecutive la fel = limita confirmata (fara bypass)
+                        val confirmed = pendingLimitCount >= CONFIRMATIONS_NEEDED
                         
                         if (confirmed && limit != lastAnnouncedLimit) {
                             Log.d(TAG, "LIMITĂ CONFIRMATĂ: $limit (era: $lastAnnouncedLimit, citiri: $pendingLimitCount, dupa_viraj: $waitingForNewLimit)")
