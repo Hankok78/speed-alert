@@ -306,17 +306,28 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private fun getSpeedLimitFromTomTomRouting(lat: Double, lon: Double, bearing: Float): Int? {
         return try {
             val tomtomKey = "4F7NveARkj9ilHALcjNgT0Sa4VUG01bA"
-            // Punct 2 la ~30m INAINTE in directia de mers (nu NE fix!)
-            val d = 0.0003 // ~30m
-            val bearingRad = Math.toRadians(bearing.toDouble())
-            val lat2 = lat + d * Math.cos(bearingRad)
-            val lon2 = lon + d * Math.sin(bearingRad) / Math.cos(Math.toRadians(lat))
-            val url = URL("https://api.tomtom.com/routing/1/calculateRoute/$lat,$lon:$lat2,$lon2/json?key=$tomtomKey&sectionType=speedLimit")
+            
+            val lat2: Double
+            val lon2: Double
+            
+            if (bearing > 0.1f) {
+                // Avem bearing valid - punct inainte in directia de mers
+                val d = 0.0005 // ~50m inainte
+                val bearingRad = Math.toRadians(bearing.toDouble())
+                lat2 = lat + d * Math.cos(bearingRad)
+                lon2 = lon + d * Math.sin(bearingRad) / Math.cos(Math.toRadians(lat))
+            } else {
+                // Bearing 0 = nesigur - offset mic NE (functioneaza ok)
+                lat2 = lat + 0.0003
+                lon2 = lon + 0.0003
+            }
+            
+            val url = URL("https://api.tomtom.com/routing/1/calculateRoute/$lat,$lon:$lat2,$lon2/json?key=$tomtomKey&sectionType=speedLimit&routeType=fastest&travelMode=car")
             
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
-            connection.connectTimeout = 3000
-            connection.readTimeout = 3000
+            connection.connectTimeout = 4000
+            connection.readTimeout = 4000
             
             val response = connection.inputStream.bufferedReader().readText()
             connection.disconnect()
@@ -327,6 +338,20 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             if (routes != null && routes.length() > 0) {
                 val sections = routes.getJSONObject(0).optJSONArray("sections")
                 if (sections != null) {
+                    // Cauta sectiunea care acopera punctul de start (index 0)
+                    for (i in 0 until sections.length()) {
+                        val section = sections.getJSONObject(i)
+                        if (section.optString("sectionType") == "SPEED_LIMIT") {
+                            val speedLimit = section.optInt("maxSpeedLimitInKmh", 0)
+                            val startIdx = section.optInt("startPointIndex", -1)
+                            // Preferam sectiunea de la start (drumul nostru)
+                            if (speedLimit > 0 && startIdx <= 1) {
+                                Log.d(TAG, "TomTom Routing: $speedLimit km/h (start=$startIdx)")
+                                return speedLimit
+                            }
+                        }
+                    }
+                    // Daca nu am gasit la start, ia prima limita gasita
                     for (i in 0 until sections.length()) {
                         val section = sections.getJSONObject(i)
                         if (section.optString("sectionType") == "SPEED_LIMIT") {
@@ -337,7 +362,10 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 }
             }
             null
-        } catch (e: Exception) { null }
+        } catch (e: Exception) {
+            Log.e(TAG, "Routing error: ${e.message}")
+            null
+        }
     }
     
     private fun getSpeedLimitFromTomTomGeocode(lat: Double, lon: Double): Int? {
@@ -347,8 +375,8 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
-            connection.connectTimeout = 2000
-            connection.readTimeout = 2000
+            connection.connectTimeout = 4000
+            connection.readTimeout = 4000
             
             val response = connection.inputStream.bufferedReader().readText()
             connection.disconnect()
@@ -362,12 +390,19 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                     val speedLimitStr = addressInfo.optString("speedLimit", "")
                     if (speedLimitStr.isNotEmpty()) {
                         val match = Regex("(\\d+)").find(speedLimitStr)
-                        if (match != null) return match.groupValues[1].toInt()
+                        if (match != null) {
+                            val limit = match.groupValues[1].toInt()
+                            Log.d(TAG, "TomTom Geocode: $limit km/h")
+                            return limit
+                        }
                     }
                 }
             }
             null
-        } catch (e: Exception) { null }
+        } catch (e: Exception) {
+            Log.e(TAG, "Geocode error: ${e.message}")
+            null
+        }
     }
     
     private fun getSpeedLimitFromOSM(lat: Double, lon: Double): Int? {
