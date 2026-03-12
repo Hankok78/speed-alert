@@ -182,7 +182,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             
             serviceScope.launch {
                 try {
-                    val limit = getSpeedLimit(location.latitude, location.longitude)
+                    val limit = getSpeedLimit(location.latitude, location.longitude, currentBearing)
                     
                     if (limit != null && limit > 0) {
                         limitUpdateTime = System.currentTimeMillis()
@@ -197,8 +197,8 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                         }
                         
                         // Anunță DOAR dacă avem 3 citiri consecutive la fel
-                        // SAU dacă e o schimbare MARE (diferență > 20 km/h) - probabil viraj
-                        val bigChange = Math.abs(limit - lastAnnouncedLimit) >= 20
+                        // SAU dacă e o schimbare MARE (diferență > 30 km/h) - probabil viraj
+                        val bigChange = Math.abs(limit - lastAnnouncedLimit) >= 30
                         val confirmed = pendingLimitCount >= CONFIRMATIONS_NEEDED
                         
                         if ((confirmed || bigChange) && limit != lastAnnouncedLimit) {
@@ -290,9 +290,9 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         }
     }
 
-    private fun getSpeedLimit(lat: Double, lon: Double): Int? {
+    private fun getSpeedLimit(lat: Double, lon: Double, bearing: Float): Int? {
         // TomTom Routing API - limite REALE
-        var limit = getSpeedLimitFromTomTomRouting(lat, lon)
+        var limit = getSpeedLimitFromTomTomRouting(lat, lon, bearing)
         if (limit != null && limit > 0) return limit
         
         // Fallback: TomTom Geocode
@@ -303,11 +303,14 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         return getSpeedLimitFromOSM(lat, lon)
     }
     
-    private fun getSpeedLimitFromTomTomRouting(lat: Double, lon: Double): Int? {
+    private fun getSpeedLimitFromTomTomRouting(lat: Double, lon: Double, bearing: Float): Int? {
         return try {
             val tomtomKey = "4F7NveARkj9ilHALcjNgT0Sa4VUG01bA"
-            val lat2 = lat + 0.0003
-            val lon2 = lon + 0.0003
+            // Punct 2 la ~30m INAINTE in directia de mers (nu NE fix!)
+            val d = 0.0003 // ~30m
+            val bearingRad = Math.toRadians(bearing.toDouble())
+            val lat2 = lat + d * Math.cos(bearingRad)
+            val lon2 = lon + d * Math.sin(bearingRad) / Math.cos(Math.toRadians(lat))
             val url = URL("https://api.tomtom.com/routing/1/calculateRoute/$lat,$lon:$lat2,$lon2/json?key=$tomtomKey&sectionType=speedLimit")
             
             val connection = url.openConnection() as HttpURLConnection
