@@ -49,11 +49,7 @@ class MainActivity : AppCompatActivity() {
         btnStop.setOnClickListener { stopService() }
 
         SpeedAlertService.speedLimitLiveData.observe(this) { limit ->
-            tvSpeedLimit.text = when {
-                limit == -1 -> "∞"
-                limit > 0 -> "$limit"
-                else -> "--"
-            }
+            tvSpeedLimit.text = if (limit > 0) "$limit" else "--"
         }
 
         SpeedAlertService.currentSpeedLiveData.observe(this) { speed ->

@@ -165,12 +165,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         }
         lastBearing = currentBearing
         
-        val limitText = when {
-            cachedSpeedLimit == -1 -> "∞"
-            cachedSpeedLimit > 0 -> "$cachedSpeedLimit"
-            else -> "?"
-        }
-        updateNotification("Viteză: ${speedKmh.toInt()} km/h | Limită: $limitText")
+        updateNotification("Viteză: ${speedKmh.toInt()} km/h | Limită: ${if (cachedSpeedLimit > 0) cachedSpeedLimit else "?"}")
         updateFloatingBubble(speedKmh.toInt(), cachedSpeedLimit)
         
         val distance = floatArrayOf(0f)
@@ -178,8 +173,8 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             Location.distanceBetween(lastQueryLat, lastQueryLon, location.latitude, location.longitude, distance)
         }
         
-        // Verifică mai des: la 10 metri SAU dacă am făcut viraj SAU nu avem date (0 = necunoscut)
-        val shouldQuery = distance[0] > 10 || isTurning || cachedSpeedLimit == 0 || lastQueryLat == 0.0
+        // Verifică mai des: la 10 metri SAU dacă am făcut viraj SAU nu avem limită
+        val shouldQuery = distance[0] > 10 || isTurning || cachedSpeedLimit <= 0 || lastQueryLat == 0.0
         
         if (shouldQuery) {
             lastQueryLat = location.latitude
@@ -187,65 +182,46 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             
             serviceScope.launch {
                 try {
-                    val limit = getSpeedLimit(location.latitude, location.longitude, currentBearing)
+                    val limit = getSpeedLimit(location.latitude, location.longitude)
                     
-                    if (limit != null && (limit > 0 || limit == -1)) {
+                    if (limit != null && limit > 0) {
                         limitUpdateTime = System.currentTimeMillis()
                         
-                        // Tratament special pentru FARA LIMITA (autostrada nelimitata)
-                        if (limit == -1) {
-                            if (lastAnnouncedLimit != -1) {
-                                Log.d(TAG, "AUTOSTRADA FARA LIMITA!")
-                                cachedSpeedLimit = -1
-                                speedLimitLiveData.postValue(-1)
-                                lastAnnouncedLimit = -1
-                                isCurrentlySpeeding = false
-                                alreadyWarnedForThisZone = false
-                                warnedOnce = false
-                                waitingForNewLimit = false
-                                pendingLimit = -1
-                                pendingLimitCount = 0
-                                
-                                withContext(Dispatchers.Main) {
-                                    announceMessage("Fără limită! Autostradă liberă!")
-                                }
-                            } else {
-                                cachedSpeedLimit = -1
-                                waitingForNewLimit = false
-                            }
+                        // STABILIZARE: Așteaptă 3 citiri la fel înainte de a anunța
+                        if (limit == pendingLimit) {
+                            pendingLimitCount++
                         } else {
-                            // Limita normala (> 0)
-                            // STABILIZARE: Asteapta 3 citiri la fel inainte de a anunta
-                            if (limit == pendingLimit) {
-                                pendingLimitCount++
-                            } else {
-                                pendingLimit = limit
-                                pendingLimitCount = 1
-                            }
-                            
-                            val bigChange = Math.abs(limit - lastAnnouncedLimit) >= 20
-                            val confirmed = pendingLimitCount >= CONFIRMATIONS_NEEDED
-                            
-                            if ((confirmed || bigChange) && limit != lastAnnouncedLimit) {
-                                Log.d(TAG, "LIMITA CONFIRMATA: $limit (era: $lastAnnouncedLimit, citiri: $pendingLimitCount)")
-                                
-                                cachedSpeedLimit = limit
-                                speedLimitLiveData.postValue(limit)
-                                lastAnnouncedLimit = limit
-                                isCurrentlySpeeding = false
-                                alreadyWarnedForThisZone = false
-                                warnedOnce = false
-                                waitingForNewLimit = false
-                                pendingLimitCount = 0
-                                
-                                withContext(Dispatchers.Main) {
-                                    announceMessage("Atenție! Limită de $limit")
-                                }
-                            } else if (limit == lastAnnouncedLimit) {
-                                cachedSpeedLimit = limit
-                                waitingForNewLimit = false
-                            }
+                            // Limită nouă - începe numărătoarea
+                            pendingLimit = limit
+                            pendingLimitCount = 1
                         }
+                        
+                        // Anunță DOAR dacă avem 3 citiri consecutive la fel
+                        // SAU dacă e o schimbare MARE (diferență > 20 km/h) - probabil viraj
+                        val bigChange = Math.abs(limit - lastAnnouncedLimit) >= 20
+                        val confirmed = pendingLimitCount >= CONFIRMATIONS_NEEDED
+                        
+                        if ((confirmed || bigChange) && limit != lastAnnouncedLimit) {
+                            Log.d(TAG, "LIMITĂ CONFIRMATĂ: $limit (era: $lastAnnouncedLimit, citiri: $pendingLimitCount)")
+                            
+                            cachedSpeedLimit = limit
+                            speedLimitLiveData.postValue(limit)
+                            lastAnnouncedLimit = limit
+                            isCurrentlySpeeding = false
+                            alreadyWarnedForThisZone = false
+                            warnedOnce = false
+                            waitingForNewLimit = false
+                            pendingLimitCount = 0
+                            
+                            withContext(Dispatchers.Main) {
+                                announceMessage("Atenție! Limită de $limit")
+                            }
+                        } else if (limit == lastAnnouncedLimit) {
+                            // Limita e aceeași ca cea anunțată - OK
+                            cachedSpeedLimit = limit
+                            waitingForNewLimit = false
+                        }
+                        // Altfel, nu face nimic - așteaptă mai multe confirmări
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error: ${e.message}")
@@ -266,7 +242,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         "Nu ai ce face cu banii? Vrei să-i dai la poliție?",
         "Vrei să plătești amendă? Că e scumpă!",
         "Hei șoferule! Frânează odată!",
-        "Asta nu-i autostradă fără limită! Încetinește!",
+        "Încetinește că nu ești pe autobahn!",
         "Ce grăbit ești! Încetinește!",
         "Radar în față! Glumesc, dar încetinește!",
         "Portofelul tău plânge! Încetinește!",
@@ -276,8 +252,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private var warnedOnce = false  // O singură avertizare per zonă
     
     private fun checkSpeedingAndWarn(speedKmh: Float, limit: Int) {
-        // Nu avertiza daca nu avem limita sau suntem pe autostrada fara limita
-        if (limit <= 0 || limit == -1) return
+        if (limit <= 0) return
         
         // Verifică dacă limita e proaspătă
         val limitAge = System.currentTimeMillis() - limitUpdateTime
@@ -315,161 +290,22 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         }
     }
 
-    // -1 = fara limita (autostrada nelimitata)
-    // >0 = limita normala
-    // null = nu s-a putut determina
-    
-    private fun getSpeedLimit(lat: Double, lon: Double, bearing: Float): Int? {
-        // PASUL 1: TomTom Routing API (sursa principala - functioneaza cel mai bine pe drumuri normale)
-        val routingLimit = getSpeedLimitFromTomTomRouting(lat, lon)
-        if (routingLimit != null && routingLimit > 0) return routingLimit
+    private fun getSpeedLimit(lat: Double, lon: Double): Int? {
+        // TomTom Routing API - limite REALE
+        var limit = getSpeedLimitFromTomTomRouting(lat, lon)
+        if (limit != null && limit > 0) return limit
         
-        // PASUL 2: Routing n-a gasit limita -> verifica daca suntem pe autostrada
-        val roadInfo = getRoadInfo(lat, lon)
+        // Fallback: TomTom Geocode
+        limit = getSpeedLimitFromTomTomGeocode(lat, lon)
+        if (limit != null && limit > 0) return limit
         
-        if (roadInfo.isHighway) {
-            Log.d(TAG, "PE AUTOSTRADA: ${roadInfo.roadName}")
-            // Incearca si routing cu bearing pe autostrada
-            val hwLimit = getHighwaySpeedLimit(lat, lon, bearing)
-            if (hwLimit != null && hwLimit > 0) return hwLimit
-            // Pe autostrada fara limita -> FARA LIMITA
-            return -1
-        }
-        
-        // PASUL 3: Nu suntem pe autostrada - foloseste speedLimit din reverse geocode ca fallback
-        if (roadInfo.speedLimit > 0) return roadInfo.speedLimit
-        
-        // PASUL 4: Fallback final - OSM
+        // Fallback: OSM
         return getSpeedLimitFromOSM(lat, lon)
-    }
-    
-    data class RoadInfo(val isHighway: Boolean, val speedLimit: Int, val roadName: String)
-    
-    private fun getRoadInfo(lat: Double, lon: Double): RoadInfo {
-        return try {
-            val tomtomKey = "4F7NveARkj9ilHALcjNgT0Sa4VUG01bA"
-            val url = URL("https://api.tomtom.com/search/2/reverseGeocode/$lat,$lon.json?key=$tomtomKey&returnSpeedLimit=true&returnRoadUse=true")
-            
-            val connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 3000
-            connection.readTimeout = 3000
-            
-            val response = connection.inputStream.bufferedReader().readText()
-            connection.disconnect()
-            
-            val json = JSONObject(response)
-            val addresses = json.optJSONArray("addresses")
-            
-            if (addresses != null && addresses.length() > 0) {
-                val addrObj = addresses.getJSONObject(0)
-                val addressInfo = addrObj.optJSONObject("address")
-                
-                // Detecteaza tip drum din roadUse
-                var isHighway = false
-                val roadUseArray = addrObj.optJSONArray("roadUse")
-                if (roadUseArray != null) {
-                    for (i in 0 until roadUseArray.length()) {
-                        val use = roadUseArray.getString(i)
-                        if (use == "LimitedAccess") {
-                            isHighway = true
-                            break
-                        }
-                    }
-                }
-                
-                // Extrage speed limit
-                var speedLimit = 0
-                if (addressInfo != null) {
-                    val speedLimitStr = addressInfo.optString("speedLimit", "")
-                    if (speedLimitStr.isNotEmpty()) {
-                        val match = Regex("(\\d+)").find(speedLimitStr)
-                        if (match != null) speedLimit = match.groupValues[1].toInt()
-                    }
-                }
-                
-                // Extrage numele drumului
-                val roadName = if (addressInfo != null) {
-                    val routeNumbers = addressInfo.optJSONArray("routeNumbers")
-                    if (routeNumbers != null && routeNumbers.length() > 0) {
-                        routeNumbers.getString(0)
-                    } else {
-                        addressInfo.optString("street", "necunoscut")
-                    }
-                } else "necunoscut"
-                
-                Log.d(TAG, "RoadInfo: highway=$isHighway, speedLimit=$speedLimit, road=$roadName")
-                return RoadInfo(isHighway, speedLimit, roadName)
-            }
-            RoadInfo(false, 0, "necunoscut")
-        } catch (e: Exception) {
-            Log.e(TAG, "getRoadInfo error: ${e.message}")
-            RoadInfo(false, 0, "necunoscut")
-        }
-    }
-    
-    // Obtine limita pe autostrada folosind routing cu bearing
-    private fun getHighwaySpeedLimit(lat: Double, lon: Double, bearing: Float): Int? {
-        return try {
-            val tomtomKey = "4F7NveARkj9ilHALcjNgT0Sa4VUG01bA"
-            
-            // Proiecteaza al doilea punct ~300m inainte in directia de mers
-            val distance = 0.003 // ~300m
-            val bearingRad = Math.toRadians(bearing.toDouble())
-            val lat2 = lat + distance * Math.cos(bearingRad)
-            val lon2 = lon + distance * Math.sin(bearingRad) / Math.cos(Math.toRadians(lat))
-            
-            val url = URL("https://api.tomtom.com/routing/1/calculateRoute/$lat,$lon:$lat2,$lon2/json?key=$tomtomKey&sectionType=speedLimit&routeType=fastest&travelMode=car")
-            
-            val connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 3000
-            connection.readTimeout = 3000
-            
-            val response = connection.inputStream.bufferedReader().readText()
-            connection.disconnect()
-            
-            val json = JSONObject(response)
-            val routes = json.optJSONArray("routes")
-            
-            if (routes != null && routes.length() > 0) {
-                val sections = routes.getJSONObject(0).optJSONArray("sections")
-                
-                if (sections == null || sections.length() == 0) {
-                    // Nicio sectiune de limita -> FARA LIMITA
-                    Log.d(TAG, "Highway routing: no speed sections = UNLIMITED")
-                    return null
-                }
-                
-                // Cauta prima sectiune SPEED_LIMIT
-                for (i in 0 until sections.length()) {
-                    val section = sections.getJSONObject(i)
-                    if (section.optString("sectionType") == "SPEED_LIMIT") {
-                        val startIdx = section.optInt("startPointIndex", 0)
-                        if (startIdx == 0) {
-                            // Limita incepe de la punctul nostru
-                            val speedLimit = section.optInt("maxSpeedLimitInKmh", 0)
-                            Log.d(TAG, "Highway routing: limit at start = $speedLimit")
-                            if (speedLimit > 0) return speedLimit
-                        } else {
-                            // Punctul nostru NU are limita (sectiunea incepe mai tarziu)
-                            Log.d(TAG, "Highway routing: no limit at start (first section at $startIdx) = UNLIMITED")
-                            return null
-                        }
-                    }
-                }
-            }
-            null
-        } catch (e: Exception) {
-            Log.e(TAG, "getHighwaySpeedLimit error: ${e.message}")
-            null
-        }
     }
     
     private fun getSpeedLimitFromTomTomRouting(lat: Double, lon: Double): Int? {
         return try {
             val tomtomKey = "4F7NveARkj9ilHALcjNgT0Sa4VUG01bA"
-            // Offset mic (~30m) - functioneaza bine pe drumuri normale
             val lat2 = lat + 0.0003
             val lon2 = lon + 0.0003
             val url = URL("https://api.tomtom.com/routing/1/calculateRoute/$lat,$lon:$lat2,$lon2/json?key=$tomtomKey&sectionType=speedLimit")
@@ -494,6 +330,36 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                             val speedLimit = section.optInt("maxSpeedLimitInKmh", 0)
                             if (speedLimit > 0) return speedLimit
                         }
+                    }
+                }
+            }
+            null
+        } catch (e: Exception) { null }
+    }
+    
+    private fun getSpeedLimitFromTomTomGeocode(lat: Double, lon: Double): Int? {
+        return try {
+            val tomtomKey = "4F7NveARkj9ilHALcjNgT0Sa4VUG01bA"
+            val url = URL("https://api.tomtom.com/search/2/reverseGeocode/$lat,$lon.json?key=$tomtomKey&returnSpeedLimit=true")
+            
+            val connection = url.openConnection() as HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.connectTimeout = 2000
+            connection.readTimeout = 2000
+            
+            val response = connection.inputStream.bufferedReader().readText()
+            connection.disconnect()
+            
+            val json = JSONObject(response)
+            val addresses = json.optJSONArray("addresses")
+            
+            if (addresses != null && addresses.length() > 0) {
+                val addressInfo = addresses.getJSONObject(0).optJSONObject("address")
+                if (addressInfo != null) {
+                    val speedLimitStr = addressInfo.optString("speedLimit", "")
+                    if (speedLimitStr.isNotEmpty()) {
+                        val match = Regex("(\\d+)").find(speedLimitStr)
+                        if (match != null) return match.groupValues[1].toInt()
                     }
                 }
             }
@@ -588,7 +454,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 bubble.text = "$speed"
                 (bubble.background as? GradientDrawable)?.setColor(
                     when {
-                        limit == -1 -> Color.parseColor("#9C27B0") // Violet pentru fara limita
                         limit <= 0 -> Color.parseColor("#2196F3")
                         speed > limit + 5 -> Color.parseColor("#F44336")
                         speed > limit -> Color.parseColor("#FF9800")
