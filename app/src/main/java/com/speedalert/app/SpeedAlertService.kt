@@ -62,10 +62,10 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private var lastBearing = 0f
     private var limitUpdateTime = 0L
     
-    // Stabilizare limită - 3 citiri la fel inainte de anunt
-    private var pendingLimit = 0
-    private var pendingLimitCount = 0
-    private val CONFIRMATIONS_NEEDED = 3
+    // Fereastra de stabilizare: din ultimele 5 citiri, 3 la fel = confirmat
+    private val recentLimits = mutableListOf<Int>()
+    private val WINDOW_SIZE = 5
+    private val MIN_MATCH = 3
     
     private var windowManager: WindowManager? = null
     private var floatingBubble: TextView? = null
@@ -158,13 +158,11 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         
         if (isTurning) {
             Log.d(TAG, "VIRAJ DETECTAT! Bearing change: $bearingChange")
-            // Resetează complet - așteaptă limita nouă de pe strada nouă
             waitingForNewLimit = true
             isCurrentlySpeeding = false
             alreadyWarnedForThisZone = false
             warnedOnce = false
-            pendingLimit = 0
-            pendingLimitCount = 0
+            recentLimits.clear()
         }
         lastBearing = currentBearing
         
@@ -190,37 +188,53 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                     if (limit != null && limit > 0) {
                         limitUpdateTime = System.currentTimeMillis()
                         
-                        // STABILIZARE
-                        if (limit == pendingLimit) {
-                            pendingLimitCount++
-                        } else {
-                            pendingLimit = limit
-                            pendingLimitCount = 1
-                        }
-                        
-                        // Dupa viraj: accepta IMEDIAT prima citire
-                        // Pe drum drept: 3 confirmari (filtreaza strazi laterale)
-                        val neededConfirmations = if (waitingForNewLimit) 1 else CONFIRMATIONS_NEEDED
-                        val confirmed = pendingLimitCount >= neededConfirmations
-                        
-                        if (confirmed && limit != lastAnnouncedLimit) {
-                            Log.d(TAG, "LIMITĂ CONFIRMATĂ: $limit (era: $lastAnnouncedLimit, citiri: $pendingLimitCount, dupa_viraj: $waitingForNewLimit)")
-                            
-                            cachedSpeedLimit = limit
-                            speedLimitLiveData.postValue(limit)
-                            lastAnnouncedLimit = limit
-                            isCurrentlySpeeding = false
-                            alreadyWarnedForThisZone = false
-                            warnedOnce = false
-                            waitingForNewLimit = false
-                            pendingLimitCount = 0
-                            
-                            withContext(Dispatchers.Main) {
-                                announceMessage("Atenție! Limită de $limit")
+                        if (waitingForNewLimit) {
+                            // DUPA VIRAJ: accepta IMEDIAT
+                            if (limit != lastAnnouncedLimit) {
+                                Log.d(TAG, "LIMITA DUPA VIRAJ: $limit (era: $lastAnnouncedLimit)")
+                                cachedSpeedLimit = limit
+                                speedLimitLiveData.postValue(limit)
+                                lastAnnouncedLimit = limit
+                                isCurrentlySpeeding = false
+                                alreadyWarnedForThisZone = false
+                                warnedOnce = false
+                                waitingForNewLimit = false
+                                recentLimits.clear()
+                                
+                                withContext(Dispatchers.Main) {
+                                    announceMessage("Atenție! Limită de $limit")
+                                }
+                            } else {
+                                cachedSpeedLimit = limit
+                                waitingForNewLimit = false
                             }
-                        } else if (limit == lastAnnouncedLimit) {
-                            cachedSpeedLimit = limit
-                            waitingForNewLimit = false
+                        } else {
+                            // DRUM DREPT: fereastra 5 citiri, 3 la fel = confirmat
+                            recentLimits.add(limit)
+                            if (recentLimits.size > WINDOW_SIZE) recentLimits.removeAt(0)
+                            
+                            // Gaseste limita cu cele mai multe aparitii
+                            val counts = recentLimits.groupBy { it }
+                            val best = counts.maxByOrNull { it.value.size }
+                            
+                            if (best != null && best.value.size >= MIN_MATCH && best.key != lastAnnouncedLimit) {
+                                val newLimit = best.key
+                                Log.d(TAG, "LIMITA CONFIRMATA: $newLimit (era: $lastAnnouncedLimit, fereastra: $recentLimits)")
+                                
+                                cachedSpeedLimit = newLimit
+                                speedLimitLiveData.postValue(newLimit)
+                                lastAnnouncedLimit = newLimit
+                                isCurrentlySpeeding = false
+                                alreadyWarnedForThisZone = false
+                                warnedOnce = false
+                                recentLimits.clear()
+                                
+                                withContext(Dispatchers.Main) {
+                                    announceMessage("Atenție! Limită de $newLimit")
+                                }
+                            } else if (limit == lastAnnouncedLimit) {
+                                cachedSpeedLimit = limit
+                            }
                         }
                     }
                 } catch (e: Exception) {
