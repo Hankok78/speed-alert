@@ -198,8 +198,10 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                             pendingLimitCount = 1
                         }
                         
-                        // 3 citiri consecutive la fel = limita confirmata (fara bypass)
-                        val confirmed = pendingLimitCount >= CONFIRMATIONS_NEEDED
+                        // Dupa viraj: accepta IMEDIAT prima citire
+                        // Pe drum drept: 3 confirmari (filtreaza strazi laterale)
+                        val neededConfirmations = if (waitingForNewLimit) 1 else CONFIRMATIONS_NEEDED
+                        val confirmed = pendingLimitCount >= neededConfirmations
                         
                         if (confirmed && limit != lastAnnouncedLimit) {
                             Log.d(TAG, "LIMITĂ CONFIRMATĂ: $limit (era: $lastAnnouncedLimit, citiri: $pendingLimitCount, dupa_viraj: $waitingForNewLimit)")
