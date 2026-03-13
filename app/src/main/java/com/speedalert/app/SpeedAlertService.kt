@@ -62,10 +62,10 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private var lastBearing = 0f
     private var limitUpdateTime = 0L
     
-    // Stabilizare limită - fereastra: 3 din 5 citiri la fel = confirmat
-    private val recentLimits = mutableListOf<Int>()
-    private val WINDOW_SIZE = 5
-    private val MIN_MATCH = 3
+    // Stabilizare limită - anunță doar când e confirmată
+    private var pendingLimit = 0
+    private var pendingLimitCount = 0
+    private val CONFIRMATIONS_NEEDED = 3  // Trebuie 3 citiri la fel pentru a confirma
     
     private var windowManager: WindowManager? = null
     private var floatingBubble: TextView? = null
@@ -158,10 +158,10 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         
         if (isTurning) {
             Log.d(TAG, "VIRAJ DETECTAT! Bearing change: $bearingChange")
+            // Resetează - așteaptă limita nouă înainte de a avertiza
             waitingForNewLimit = true
             isCurrentlySpeeding = false
             alreadyWarnedForThisZone = false
-            recentLimits.clear()
         }
         lastBearing = currentBearing
         
@@ -187,33 +187,41 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                     if (limit != null && limit > 0) {
                         limitUpdateTime = System.currentTimeMillis()
                         
-                        // FEREASTRA: din ultimele 5 citiri, 3 la fel = confirmat
-                        recentLimits.add(limit)
-                        if (recentLimits.size > WINDOW_SIZE) recentLimits.removeAt(0)
+                        // STABILIZARE: Așteaptă 3 citiri la fel înainte de a anunța
+                        if (limit == pendingLimit) {
+                            pendingLimitCount++
+                        } else {
+                            // Limită nouă - începe numărătoarea
+                            pendingLimit = limit
+                            pendingLimitCount = 1
+                        }
                         
-                        val counts = recentLimits.groupBy { it }
-                        val best = counts.maxByOrNull { it.value.size }
+                        // Anunță DOAR dacă avem 3 citiri consecutive la fel
+                        // SAU dacă e o schimbare MARE (diferență > 20 km/h) - probabil viraj
+                        val bigChange = Math.abs(limit - lastAnnouncedLimit) >= 20
+                        val confirmed = pendingLimitCount >= CONFIRMATIONS_NEEDED
                         
-                        if (best != null && best.value.size >= MIN_MATCH && best.key != lastAnnouncedLimit) {
-                            val newLimit = best.key
-                            Log.d(TAG, "LIMITĂ CONFIRMATĂ: $newLimit (era: $lastAnnouncedLimit, fereastra: $recentLimits)")
+                        if ((confirmed || bigChange) && limit != lastAnnouncedLimit) {
+                            Log.d(TAG, "LIMITĂ CONFIRMATĂ: $limit (era: $lastAnnouncedLimit, citiri: $pendingLimitCount)")
                             
-                            cachedSpeedLimit = newLimit
-                            speedLimitLiveData.postValue(newLimit)
-                            lastAnnouncedLimit = newLimit
+                            cachedSpeedLimit = limit
+                            speedLimitLiveData.postValue(limit)
+                            lastAnnouncedLimit = limit
                             isCurrentlySpeeding = false
                             alreadyWarnedForThisZone = false
                             warnedOnce = false
                             waitingForNewLimit = false
-                            recentLimits.clear()
+                            pendingLimitCount = 0
                             
                             withContext(Dispatchers.Main) {
-                                announceMessage("Atenție! Limită de $newLimit")
+                                announceMessage("Atenție! Limită de $limit")
                             }
                         } else if (limit == lastAnnouncedLimit) {
+                            // Limita e aceeași ca cea anunțată - OK
                             cachedSpeedLimit = limit
                             waitingForNewLimit = false
                         }
+                        // Altfel, nu face nimic - așteaptă mai multe confirmări
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error: ${e.message}")
