@@ -291,91 +291,19 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     }
 
     private fun getSpeedLimit(lat: Double, lon: Double): Int? {
-        // TomTom Routing API - limite REALE
-        var limit = getSpeedLimitFromTomTomRouting(lat, lon)
-        if (limit != null && limit > 0) return limit
-        
-        // Fallback: TomTom Geocode
-        limit = getSpeedLimitFromTomTomGeocode(lat, lon)
-        if (limit != null && limit > 0) return limit
-        
-        // Fallback: OSM
         return getSpeedLimitFromOSM(lat, lon)
-    }
-    
-    private fun getSpeedLimitFromTomTomRouting(lat: Double, lon: Double): Int? {
-        return try {
-            val tomtomKey = "4F7NveARkj9ilHALcjNgT0Sa4VUG01bA"
-            val lat2 = lat + 0.0003
-            val lon2 = lon + 0.0003
-            val url = URL("https://api.tomtom.com/routing/1/calculateRoute/$lat,$lon:$lat2,$lon2/json?key=$tomtomKey&sectionType=speedLimit")
-            
-            val connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 3000
-            connection.readTimeout = 3000
-            
-            val response = connection.inputStream.bufferedReader().readText()
-            connection.disconnect()
-            
-            val json = JSONObject(response)
-            val routes = json.optJSONArray("routes")
-            
-            if (routes != null && routes.length() > 0) {
-                val sections = routes.getJSONObject(0).optJSONArray("sections")
-                if (sections != null) {
-                    for (i in 0 until sections.length()) {
-                        val section = sections.getJSONObject(i)
-                        if (section.optString("sectionType") == "SPEED_LIMIT") {
-                            val speedLimit = section.optInt("maxSpeedLimitInKmh", 0)
-                            if (speedLimit > 0) return speedLimit
-                        }
-                    }
-                }
-            }
-            null
-        } catch (e: Exception) { null }
-    }
-    
-    private fun getSpeedLimitFromTomTomGeocode(lat: Double, lon: Double): Int? {
-        return try {
-            val tomtomKey = "4F7NveARkj9ilHALcjNgT0Sa4VUG01bA"
-            val url = URL("https://api.tomtom.com/search/2/reverseGeocode/$lat,$lon.json?key=$tomtomKey&returnSpeedLimit=true")
-            
-            val connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "GET"
-            connection.connectTimeout = 2000
-            connection.readTimeout = 2000
-            
-            val response = connection.inputStream.bufferedReader().readText()
-            connection.disconnect()
-            
-            val json = JSONObject(response)
-            val addresses = json.optJSONArray("addresses")
-            
-            if (addresses != null && addresses.length() > 0) {
-                val addressInfo = addresses.getJSONObject(0).optJSONObject("address")
-                if (addressInfo != null) {
-                    val speedLimitStr = addressInfo.optString("speedLimit", "")
-                    if (speedLimitStr.isNotEmpty()) {
-                        val match = Regex("(\\d+)").find(speedLimitStr)
-                        if (match != null) return match.groupValues[1].toInt()
-                    }
-                }
-            }
-            null
-        } catch (e: Exception) { null }
     }
     
     private fun getSpeedLimitFromOSM(lat: Double, lon: Double): Int? {
         return try {
-            val query = "[out:json][timeout:3];way(around:25,$lat,$lon)[maxspeed];out tags;"
+            // Cauta drumuri cu maxspeed in raza de 30m
+            val query = "[out:json][timeout:4];way(around:30,$lat,$lon)[\"maxspeed\"][highway~\"motorway|trunk|primary|secondary|tertiary|residential|living_street|unclassified\"];out tags;"
             val url = URL("https://overpass-api.de/api/interpreter")
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "POST"
             connection.doOutput = true
-            connection.connectTimeout = 3000
-            connection.readTimeout = 3000
+            connection.connectTimeout = 4000
+            connection.readTimeout = 4000
             
             connection.outputStream.write("data=${URLEncoder.encode(query, "UTF-8")}".toByteArray())
             val response = connection.inputStream.bufferedReader().readText()
@@ -383,13 +311,89 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             
             val elements = JSONObject(response).optJSONArray("elements")
             if (elements != null && elements.length() > 0) {
-                val tags = elements.getJSONObject(0).optJSONObject("tags")
-                val maxspeed = tags?.optString("maxspeed", "") ?: ""
-                val match = Regex("(\\d+)").find(maxspeed)
-                if (match != null) return match.groupValues[1].toInt()
+                // Prioritate: drumuri principale > rezidentiale
+                var bestLimit = 0
+                var bestPriority = -1
+                
+                for (i in 0 until elements.length()) {
+                    val tags = elements.getJSONObject(i).optJSONObject("tags") ?: continue
+                    val highway = tags.optString("highway", "")
+                    val maxspeed = tags.optString("maxspeed", "")
+                    val conditional = tags.optString("maxspeed:conditional", "")
+                    
+                    // Prioritate drum (mai mare = mai important)
+                    val priority = when(highway) {
+                        "motorway" -> 6
+                        "trunk" -> 5
+                        "primary" -> 4
+                        "secondary" -> 3
+                        "tertiary" -> 2
+                        "residential", "living_street", "unclassified" -> 1
+                        else -> 0
+                    }
+                    
+                    // Verifica limita conditionala (cu orar) mai intai
+                    if (conditional.isNotEmpty()) {
+                        val condLimit = parseConditionalSpeed(conditional)
+                        if (condLimit != null && priority > bestPriority) {
+                            bestLimit = condLimit
+                            bestPriority = priority
+                            continue
+                        }
+                    }
+                    
+                    // Limita normala
+                    if (maxspeed == "none") {
+                        // Autobahn fara limita
+                        if (priority > bestPriority) {
+                            bestLimit = -1
+                            bestPriority = priority
+                        }
+                    } else {
+                        val match = Regex("(\\d+)").find(maxspeed)
+                        if (match != null) {
+                            val limit = match.groupValues[1].toInt()
+                            if (priority > bestPriority) {
+                                bestLimit = limit
+                                bestPriority = priority
+                            }
+                        }
+                    }
+                }
+                
+                if (bestLimit != 0) {
+                    Log.d(TAG, "OSM: limita=$bestLimit, prioritate=$bestPriority")
+                    return bestLimit
+                }
             }
             null
-        } catch (e: Exception) { null }
+        } catch (e: Exception) {
+            Log.e(TAG, "OSM error: ${e.message}")
+            null
+        }
+    }
+    
+    // Parseaza limite cu orar: "30 @ (Mo-Fr 07:00-18:30)"
+    private fun parseConditionalSpeed(conditional: String): Int? {
+        try {
+            val parts = conditional.split("@")
+            if (parts.size < 2) return null
+            
+            val speedMatch = Regex("(\\d+)").find(parts[0].trim()) ?: return null
+            val conditionalSpeed = speedMatch.groupValues[1].toInt()
+            
+            val timeMatch = Regex("(\\d{1,2}):(\\d{2})\\s*-\\s*(\\d{1,2}):(\\d{2})").find(parts[1])
+            if (timeMatch != null) {
+                val startTotal = timeMatch.groupValues[1].toInt() * 60 + timeMatch.groupValues[2].toInt()
+                val endTotal = timeMatch.groupValues[3].toInt() * 60 + timeMatch.groupValues[4].toInt()
+                
+                val cal = java.util.Calendar.getInstance()
+                val nowTotal = cal.get(java.util.Calendar.HOUR_OF_DAY) * 60 + cal.get(java.util.Calendar.MINUTE)
+                
+                if (nowTotal in startTotal..endTotal) return conditionalSpeed
+            }
+            return null
+        } catch (e: Exception) { return null }
     }
 
     private fun createNotificationChannel() {
