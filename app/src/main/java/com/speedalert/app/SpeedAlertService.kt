@@ -173,8 +173,8 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             Location.distanceBetween(lastQueryLat, lastQueryLon, location.latitude, location.longitude, distance)
         }
         
-        // Verifică mai des: la 10 metri SAU dacă am făcut viraj SAU nu avem limită
-        val shouldQuery = distance[0] > 10 || isTurning || cachedSpeedLimit <= 0 || lastQueryLat == 0.0
+        // Verifică la 50 metri (OSM Overpass nu suportă query prea des)
+        val shouldQuery = distance[0] > 50 || isTurning || cachedSpeedLimit <= 0 || lastQueryLat == 0.0
         
         if (shouldQuery) {
             lastQueryLat = location.latitude
@@ -296,16 +296,24 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     
     private fun getSpeedLimitFromOSM(lat: Double, lon: Double): Int? {
         return try {
-            // Cauta drumuri cu maxspeed in raza de 30m
-            val query = "[out:json][timeout:4];way(around:30,$lat,$lon)[\"maxspeed\"][highway~\"motorway|trunk|primary|secondary|tertiary|residential|living_street|unclassified\"];out tags;"
+            // Query simplu - cauta ORICE drum cu maxspeed in raza de 30m
+            val query = "[out:json][timeout:5];way(around:30,$lat,$lon)[maxspeed];out tags;"
             val url = URL("https://overpass-api.de/api/interpreter")
             val connection = url.openConnection() as HttpURLConnection
             connection.requestMethod = "POST"
             connection.doOutput = true
-            connection.connectTimeout = 4000
-            connection.readTimeout = 4000
+            connection.connectTimeout = 5000
+            connection.readTimeout = 5000
             
             connection.outputStream.write("data=${URLEncoder.encode(query, "UTF-8")}".toByteArray())
+            
+            val responseCode = connection.responseCode
+            if (responseCode != 200) {
+                Log.e(TAG, "OSM HTTP error: $responseCode")
+                connection.disconnect()
+                return null
+            }
+            
             val response = connection.inputStream.bufferedReader().readText()
             connection.disconnect()
             
@@ -321,7 +329,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                     val maxspeed = tags.optString("maxspeed", "")
                     val conditional = tags.optString("maxspeed:conditional", "")
                     
-                    // Prioritate drum (mai mare = mai important)
                     val priority = when(highway) {
                         "motorway" -> 6
                         "trunk" -> 5
@@ -332,19 +339,17 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                         else -> 0
                     }
                     
-                    // Verifica limita conditionala (cu orar) mai intai
+                    // Verifica limita conditionala (cu orar)
                     if (conditional.isNotEmpty()) {
                         val condLimit = parseConditionalSpeed(conditional)
-                        if (condLimit != null && priority > bestPriority) {
+                        if (condLimit != null && priority >= bestPriority) {
                             bestLimit = condLimit
                             bestPriority = priority
                             continue
                         }
                     }
                     
-                    // Limita normala
                     if (maxspeed == "none") {
-                        // Autobahn fara limita
                         if (priority > bestPriority) {
                             bestLimit = -1
                             bestPriority = priority
@@ -353,7 +358,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                         val match = Regex("(\\d+)").find(maxspeed)
                         if (match != null) {
                             val limit = match.groupValues[1].toInt()
-                            if (priority > bestPriority) {
+                            if (priority >= bestPriority) {
                                 bestLimit = limit
                                 bestPriority = priority
                             }
@@ -366,6 +371,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                     return bestLimit
                 }
             }
+            Log.d(TAG, "OSM: nimic gasit la $lat,$lon")
             null
         } catch (e: Exception) {
             Log.e(TAG, "OSM error: ${e.message}")
