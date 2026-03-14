@@ -26,12 +26,12 @@ import androidx.core.app.NotificationCompat
 import androidx.lifecycle.MutableLiveData
 import kotlinx.coroutines.*
 import org.json.JSONObject
-import org.json.JSONArray
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.util.*
 import android.graphics.drawable.GradientDrawable
+import kotlin.math.*
 
 class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListener {
 
@@ -44,6 +44,9 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         private const val CHANNEL_ID = "SpeedAlertChannel"
         private const val NOTIFICATION_ID = 1
         private const val TAG = "SpeedAlert"
+        
+        // -1 inseamna "fara limita" (Autobahn)
+        const val NO_LIMIT = -1
     }
 
     private var tts: TextToSpeech? = null
@@ -60,11 +63,12 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private var cachedSpeedLimit = 0
     private var lastBearing = 0f
     
-    // Cache local OSM - descarcat o singura data, cautat local
+    // Cache local OSM
     private data class RoadSegment(
         val maxspeed: String,
         val conditional: String,
         val highway: String,
+        val name: String,
         val points: List<Pair<Double, Double>>
     )
     private var roadCache = mutableListOf<RoadSegment>()
@@ -96,7 +100,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        val notification = buildNotification("Se pornește...")
+        val notification = buildNotification("Se porneste...")
         startForeground(NOTIFICATION_ID, notification)
         
         tts = TextToSpeech(this, this)
@@ -167,21 +171,27 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         locationLiveData.postValue(Pair(location.latitude, location.longitude))
         
         // Detecteaza viraj
-        val bearingChange = Math.abs(currentBearing - lastBearing)
-        val isTurning = bearingChange > 30 && bearingChange < 330 && lastBearing != 0f
+        val bearingChange = abs(currentBearing - lastBearing)
+        val normalizedChange = if (bearingChange > 180) 360 - bearingChange else bearingChange
+        val isTurning = normalizedChange > 30 && lastBearing != 0f
         
         if (isTurning) {
-            Log.d(TAG, "VIRAJ DETECTAT! Bearing change: $bearingChange")
+            Log.d(TAG, "VIRAJ DETECTAT! Bearing change: $normalizedChange")
             waitingForNewLimit = true
             isCurrentlySpeeding = false
             alreadyWarnedForThisZone = false
         }
         lastBearing = currentBearing
         
-        updateNotification("Viteza: ${speedKmh.toInt()} km/h | Limita: ${if (cachedSpeedLimit > 0) cachedSpeedLimit else "?"}")
+        val limitText = when {
+            cachedSpeedLimit == NO_LIMIT -> "fara limita"
+            cachedSpeedLimit > 0 -> "$cachedSpeedLimit"
+            else -> "?"
+        }
+        updateNotification("Viteza: ${speedKmh.toInt()} km/h | Limita: $limitText")
         updateFloatingBubble(speedKmh.toInt(), cachedSpeedLimit)
         
-        // Descarca cache daca nu exista sau suntem departe
+        // Descarca cache daca nu exista sau suntem departe de centrul cache-ului
         val distFromCache = floatArrayOf(0f)
         if (cacheCenterLat != 0.0) {
             Location.distanceBetween(cacheCenterLat, cacheCenterLon, location.latitude, location.longitude, distFromCache)
@@ -192,9 +202,9 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         
         // Cauta limita LOCAL din cache (INSTANT, fara internet)
         if (roadCache.isNotEmpty()) {
-            val limit = findNearestSpeedLimit(location.latitude, location.longitude)
+            val limit = findNearestSpeedLimit(location.latitude, location.longitude, currentBearing)
             
-            if (limit != null && limit > 0 && limit != lastAnnouncedLimit) {
+            if (limit != null && limit != lastAnnouncedLimit) {
                 Log.d(TAG, "LIMITA NOUA: $limit (era: $lastAnnouncedLimit)")
                 cachedSpeedLimit = limit
                 speedLimitLiveData.postValue(limit)
@@ -205,15 +215,19 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 waitingForNewLimit = false
                 
                 handler.post {
-                    announceMessage("Atentie! Limita de $limit")
+                    if (limit == NO_LIMIT) {
+                        announceMessage("Fara limita! Autostrada libera!")
+                    } else {
+                        announceMessage("Atentie! Limita de $limit")
+                    }
                 }
-            } else if (limit != null && limit > 0) {
+            } else if (limit != null) {
                 cachedSpeedLimit = limit
                 waitingForNewLimit = false
             }
         }
         
-        // Verifica depasire
+        // Verifica depasire (doar daca avem limita pozitiva)
         if (cachedSpeedLimit > 0 && !waitingForNewLimit) {
             checkSpeedingAndWarn(speedKmh, cachedSpeedLimit)
         }
@@ -227,19 +241,30 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 Log.d(TAG, "DESCARC CACHE OSM pentru $lat,$lon ...")
                 statusLiveData.postValue("Se descarca harta...")
                 
-                val query = "[out:json][timeout:25];way(around:5000,$lat,$lon)[maxspeed];out body geom;"
+                // Descarcam si drumuri FARA maxspeed explicit pt a aplica limite implicite
+                val query = """
+                    [out:json][timeout:30];
+                    (
+                      way(around:5000,$lat,$lon)["highway"~"motorway|trunk|primary|secondary|tertiary|residential|living_street|unclassified"]["maxspeed"];
+                      way(around:5000,$lat,$lon)["highway"~"motorway|trunk|primary|secondary|tertiary|residential|living_street|unclassified"][!"maxspeed"];
+                    );
+                    out body geom;
+                """.trimIndent()
+                
                 val url = URL("https://overpass-api.de/api/interpreter")
                 val connection = url.openConnection() as HttpURLConnection
                 connection.requestMethod = "POST"
                 connection.doOutput = true
                 connection.connectTimeout = 30000
                 connection.readTimeout = 30000
+                connection.setRequestProperty("User-Agent", "SpeedAlertApp/1.0")
                 
                 connection.outputStream.write("data=${URLEncoder.encode(query, "UTF-8")}".toByteArray())
                 
                 val responseCode = connection.responseCode
                 if (responseCode != 200) {
                     Log.e(TAG, "OSM HTTP error: $responseCode")
+                    statusLiveData.postValue("Eroare descarcare: $responseCode")
                     cacheLoading = false
                     return@launch
                 }
@@ -262,11 +287,12 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                             points.add(Pair(p.getDouble("lat"), p.getDouble("lon")))
                         }
                         
-                        if (points.isNotEmpty()) {
+                        if (points.size >= 2) {
                             newCache.add(RoadSegment(
                                 maxspeed = tags.optString("maxspeed", ""),
                                 conditional = tags.optString("maxspeed:conditional", ""),
                                 highway = tags.optString("highway", ""),
+                                name = tags.optString("name", ""),
                                 points = points
                             ))
                         }
@@ -281,64 +307,126 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 
             } catch (e: Exception) {
                 Log.e(TAG, "Cache error: ${e.message}")
+                statusLiveData.postValue("Eroare: ${e.message?.take(30)}")
             }
             cacheLoading = false
         }
     }
     
+    // Calculeaza distanta de la un punct la un segment de drum (punct-la-linie)
+    private fun distanceToSegment(
+        px: Double, py: Double,
+        ax: Double, ay: Double,
+        bx: Double, by: Double
+    ): Double {
+        val cosLat = cos(Math.toRadians(px))
+        // Convertim in metri aproximativ
+        val pxM = px * 111000.0
+        val pyM = py * 111000.0 * cosLat
+        val axM = ax * 111000.0
+        val ayM = ay * 111000.0 * cosLat
+        val bxM = bx * 111000.0
+        val byM = by * 111000.0 * cosLat
+        
+        val dx = bxM - axM
+        val dy = byM - ayM
+        val lenSq = dx * dx + dy * dy
+        
+        if (lenSq == 0.0) {
+            // Punct degenerat
+            val ddx = pxM - axM
+            val ddy = pyM - ayM
+            return sqrt(ddx * ddx + ddy * ddy)
+        }
+        
+        // Proiectia punctului pe segment, clamped la [0,1]
+        var t = ((pxM - axM) * dx + (pyM - ayM) * dy) / lenSq
+        t = t.coerceIn(0.0, 1.0)
+        
+        val projX = axM + t * dx
+        val projY = ayM + t * dy
+        val ddx = pxM - projX
+        val ddy = pyM - projY
+        return sqrt(ddx * ddx + ddy * ddy)
+    }
+    
+    // Calculeaza bearing-ul unui segment de drum
+    private fun segmentBearing(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+        val dlon = Math.toRadians(lon2 - lon1)
+        val y = sin(dlon) * cos(Math.toRadians(lat2))
+        val x = cos(Math.toRadians(lat1)) * sin(Math.toRadians(lat2)) -
+                sin(Math.toRadians(lat1)) * cos(Math.toRadians(lat2)) * cos(dlon)
+        return (Math.toDegrees(atan2(y, x)) + 360) % 360
+    }
+    
+    // Diferenta intre doua bearing-uri (0-180)
+    private fun bearingDiff(b1: Double, b2: Double): Double {
+        val diff = abs(b1 - b2) % 360
+        return if (diff > 180) 360 - diff else diff
+    }
+    
     // Cauta drumul cel mai aproape si returneaza limita (LOCAL, fara internet)
-    private fun findNearestSpeedLimit(lat: Double, lon: Double): Int? {
+    private fun findNearestSpeedLimit(lat: Double, lon: Double, gpsBearing: Float): Int? {
         var bestDist = Double.MAX_VALUE
         var bestLimit = 0
-        var bestPriority = -1
+        var bestScore = -1.0
+        val hasBearing = gpsBearing != 0f
         
         for (road in roadCache) {
-            // Calculeaza distanta minima de la GPS la segmentele drumului
+            // Calculeaza distanta minima la orice segment al drumului
             var minDist = Double.MAX_VALUE
-            for (point in road.points) {
-                val dlat = lat - point.first
-                val dlon = (lon - point.second) * Math.cos(Math.toRadians(lat))
-                val dist = Math.sqrt(dlat * dlat + dlon * dlon) * 111000 // in metri
-                if (dist < minDist) minDist = dist
-            }
+            var closestSegBearing = 0.0
             
-            // Doar drumuri in raza de 30m
-            if (minDist > 30) continue
-            
-            val priority = when(road.highway) {
-                "motorway" -> 6
-                "trunk" -> 5
-                "primary" -> 4
-                "secondary" -> 3
-                "tertiary" -> 2
-                "residential", "living_street", "unclassified" -> 1
-                else -> 0
-            }
-            
-            // Preferam drumul cu prioritate mai mare, sau cel mai aproape la aceeasi prioritate
-            if (priority > bestPriority || (priority == bestPriority && minDist < bestDist)) {
-                // Verifica limita conditionala (cu orar)
-                if (road.conditional.isNotEmpty()) {
-                    val condLimit = parseConditionalSpeed(road.conditional)
-                    if (condLimit != null) {
-                        bestLimit = condLimit
-                        bestPriority = priority
-                        bestDist = minDist
-                        continue
-                    }
+            for (i in 0 until road.points.size - 1) {
+                val p1 = road.points[i]
+                val p2 = road.points[i + 1]
+                val dist = distanceToSegment(lat, lon, p1.first, p1.second, p2.first, p2.second)
+                if (dist < minDist) {
+                    minDist = dist
+                    closestSegBearing = segmentBearing(p1.first, p1.second, p2.first, p2.second)
                 }
+            }
+            
+            // Doar drumuri in raza de 40m
+            if (minDist > 40) continue
+            
+            // Scor bazat pe: distanta + aliniere cu directia de mers + prioritate tip drum
+            val priority = when(road.highway) {
+                "motorway" -> 6.0
+                "trunk" -> 5.0
+                "primary" -> 4.0
+                "secondary" -> 3.0
+                "tertiary" -> 2.0
+                "residential", "living_street", "unclassified" -> 1.0
+                else -> 0.0
+            }
+            
+            // Verifica alinierea cu directia de mers
+            var bearingMatch = 1.0
+            if (hasBearing) {
+                // Drumul poate fi parcurs in ambele directii, deci verificam ambele
+                val diff1 = bearingDiff(gpsBearing.toDouble(), closestSegBearing)
+                val diff2 = bearingDiff(gpsBearing.toDouble(), (closestSegBearing + 180) % 360)
+                val bestBearingDiff = min(diff1, diff2)
                 
-                if (road.maxspeed == "none") {
-                    bestLimit = -1
-                    bestPriority = priority
-                    bestDist = minDist
+                // Daca unghiul e > 60 grade, probabil e o strada laterala
+                if (bestBearingDiff > 60) {
+                    bearingMatch = 0.1
                 } else {
-                    val match = Regex("(\\d+)").find(road.maxspeed)
-                    if (match != null) {
-                        bestLimit = match.groupValues[1].toInt()
-                        bestPriority = priority
-                        bestDist = minDist
-                    }
+                    bearingMatch = 1.0 - (bestBearingDiff / 90.0) * 0.5
+                }
+            }
+            
+            // Scor compus: prioritate drum * aliniere / distanta
+            val score = (priority + 1) * bearingMatch * (1.0 / (minDist + 1.0)) * 1000
+            
+            if (score > bestScore) {
+                // Determina limita de viteza pentru acest drum
+                val limit = resolveSpeedLimit(road)
+                if (limit != null) {
+                    bestLimit = limit
+                    bestScore = score
+                    bestDist = minDist
                 }
             }
         }
@@ -346,45 +434,98 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         return if (bestLimit != 0) bestLimit else null
     }
     
+    // Determina limita de viteza efectiva pentru un drum
+    private fun resolveSpeedLimit(road: RoadSegment): Int? {
+        // 1. Verifica mai intai limita conditionala (cu orar)
+        if (road.conditional.isNotEmpty()) {
+            val condLimit = parseConditionalSpeed(road.conditional)
+            if (condLimit != null) {
+                return condLimit
+            }
+            // Daca conditia NU e activa, continua cu maxspeed de baza
+        }
+        
+        // 2. Verifica maxspeed explicit
+        if (road.maxspeed.isNotEmpty()) {
+            if (road.maxspeed == "none") {
+                return NO_LIMIT  // Autobahn fara limita
+            }
+            if (road.maxspeed == "walk") {
+                return 5
+            }
+            val match = Regex("(\\d+)").find(road.maxspeed)
+            if (match != null) {
+                return match.groupValues[1].toInt()
+            }
+        }
+        
+        // 3. Limite implicite bazate pe tipul drumului (Germania)
+        return when(road.highway) {
+            "motorway" -> NO_LIMIT  // Autobahn implicit fara limita
+            "living_street" -> 7    // Zona rezidentiala
+            else -> null            // Nu stim limita
+        }
+    }
+    
     // Parseaza limite cu orar: "30 @ (Mo-Fr 07:00-18:00)"
     private fun parseConditionalSpeed(conditional: String): Int? {
         try {
-            val parts = conditional.split("@")
-            if (parts.size < 2) return null
+            // Poate avea mai multe conditii separate cu ";"
+            val conditions = conditional.split(";")
             
-            val speedMatch = Regex("(\\d+)").find(parts[0].trim()) ?: return null
-            val conditionalSpeed = speedMatch.groupValues[1].toInt()
-            val condition = parts[1].trim()
-            
-            val cal = Calendar.getInstance()
-            val today = cal.get(Calendar.DAY_OF_WEEK)
-            
-            val dayToNum = mapOf("Mo" to 2, "Tu" to 3, "We" to 4, "Th" to 5, "Fr" to 6, "Sa" to 7, "Su" to 1)
-            
-            val dayRange = Regex("(Mo|Tu|We|Th|Fr|Sa|Su)-(Mo|Tu|We|Th|Fr|Sa|Su)").find(condition)
-            if (dayRange != null) {
-                val startDay = dayToNum[dayRange.groupValues[1]] ?: return null
-                val endDay = dayToNum[dayRange.groupValues[2]] ?: return null
+            for (cond in conditions) {
+                val parts = cond.split("@")
+                if (parts.size < 2) continue
                 
-                val todayInRange = if (startDay <= endDay) {
-                    today in startDay..endDay
-                } else {
-                    today >= startDay || today <= endDay
+                val speedMatch = Regex("(\\d+)").find(parts[0].trim()) ?: continue
+                val conditionalSpeed = speedMatch.groupValues[1].toInt()
+                val condition = parts[1].trim()
+                
+                val cal = Calendar.getInstance()
+                val today = cal.get(Calendar.DAY_OF_WEEK)
+                
+                val dayToNum = mapOf(
+                    "Mo" to Calendar.MONDAY, "Tu" to Calendar.TUESDAY,
+                    "We" to Calendar.WEDNESDAY, "Th" to Calendar.THURSDAY,
+                    "Fr" to Calendar.FRIDAY, "Sa" to Calendar.SATURDAY,
+                    "Su" to Calendar.SUNDAY
+                )
+                
+                // Verifica zilele
+                var dayMatch = true
+                val dayRange = Regex("(Mo|Tu|We|Th|Fr|Sa|Su)-(Mo|Tu|We|Th|Fr|Sa|Su)").find(condition)
+                if (dayRange != null) {
+                    val startDay = dayToNum[dayRange.groupValues[1]] ?: continue
+                    val endDay = dayToNum[dayRange.groupValues[2]] ?: continue
+                    
+                    dayMatch = if (startDay <= endDay) {
+                        today in startDay..endDay
+                    } else {
+                        today >= startDay || today <= endDay
+                    }
                 }
                 
-                if (!todayInRange) return null
+                if (!dayMatch) continue
+                
+                // Verifica ora
+                var timeMatch = true
+                val timeRegex = Regex("(\\d{1,2}):(\\d{2})\\s*-\\s*(\\d{1,2}):(\\d{2})").find(condition)
+                if (timeRegex != null) {
+                    val startTotal = timeRegex.groupValues[1].toInt() * 60 + timeRegex.groupValues[2].toInt()
+                    val endTotal = timeRegex.groupValues[3].toInt() * 60 + timeRegex.groupValues[4].toInt()
+                    val nowTotal = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
+                    
+                    timeMatch = nowTotal in startTotal until endTotal
+                }
+                
+                if (dayMatch && timeMatch) return conditionalSpeed
             }
             
-            val timeMatch = Regex("(\\d{1,2}):(\\d{2})\\s*-\\s*(\\d{1,2}):(\\d{2})").find(condition)
-            if (timeMatch != null) {
-                val startTotal = timeMatch.groupValues[1].toInt() * 60 + timeMatch.groupValues[2].toInt()
-                val endTotal = timeMatch.groupValues[3].toInt() * 60 + timeMatch.groupValues[4].toInt()
-                val nowTotal = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
-                
-                if (nowTotal in startTotal..endTotal) return conditionalSpeed
-            }
             return null
-        } catch (e: Exception) { return null }
+        } catch (e: Exception) {
+            Log.e(TAG, "Conditional parse error: ${e.message}")
+            return null
+        }
     }
     
     private fun checkSpeedingAndWarn(speedKmh: Float, limit: Int) {
@@ -426,10 +567,11 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 bubble.text = "$speed"
                 (bubble.background as? GradientDrawable)?.setColor(
                     when {
-                        limit <= 0 -> Color.parseColor("#2196F3")
-                        speed > limit + 5 -> Color.parseColor("#F44336")
-                        speed > limit -> Color.parseColor("#FF9800")
-                        else -> Color.parseColor("#4CAF50")
+                        limit == NO_LIMIT -> Color.parseColor("#9C27B0") // Violet pt Autobahn
+                        limit <= 0 -> Color.parseColor("#2196F3")       // Albastru - se incarca
+                        speed > limit + 5 -> Color.parseColor("#F44336") // Rosu - depasire mare
+                        speed > limit -> Color.parseColor("#FF9800")     // Portocaliu - depasire mica
+                        else -> Color.parseColor("#4CAF50")              // Verde - OK
                     }
                 )
             }

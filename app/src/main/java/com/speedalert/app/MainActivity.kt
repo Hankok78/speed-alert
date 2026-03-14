@@ -30,7 +30,6 @@ class MainActivity : AppCompatActivity() {
 
     private val LOCATION_PERMISSION_CODE = 1001
     private val BACKGROUND_LOCATION_CODE = 1002
-    private val TOMTOM_KEY = "4F7NveARkj9ilHALcjNgT0Sa4VUG01bA"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -49,7 +48,11 @@ class MainActivity : AppCompatActivity() {
         btnStop.setOnClickListener { stopService() }
 
         SpeedAlertService.speedLimitLiveData.observe(this) { limit ->
-            tvSpeedLimit.text = if (limit > 0) "$limit" else "--"
+            tvSpeedLimit.text = when {
+                limit == SpeedAlertService.NO_LIMIT -> "∞"
+                limit > 0 -> "$limit"
+                else -> "--"
+            }
         }
 
         SpeedAlertService.currentSpeedLiveData.observe(this) { speed ->
