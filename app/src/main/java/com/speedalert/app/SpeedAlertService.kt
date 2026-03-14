@@ -387,16 +387,43 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             
             val speedMatch = Regex("(\\d+)").find(parts[0].trim()) ?: return null
             val conditionalSpeed = speedMatch.groupValues[1].toInt()
+            val condition = parts[1].trim()
             
-            val timeMatch = Regex("(\\d{1,2}):(\\d{2})\\s*-\\s*(\\d{1,2}):(\\d{2})").find(parts[1])
+            val cal = java.util.Calendar.getInstance()
+            val today = cal.get(java.util.Calendar.DAY_OF_WEEK)
+            // Calendar: SUNDAY=1, MONDAY=2, ..., SATURDAY=7
+            
+            val dayToNum = mapOf("Mo" to 2, "Tu" to 3, "We" to 4, "Th" to 5, "Fr" to 6, "Sa" to 7, "Su" to 1)
+            
+            // Verifica zilele: "Mo-Fr", "Mo-Sa", etc.
+            val dayRange = Regex("(Mo|Tu|We|Th|Fr|Sa|Su)-(Mo|Tu|We|Th|Fr|Sa|Su)").find(condition)
+            if (dayRange != null) {
+                val startDay = dayToNum[dayRange.groupValues[1]] ?: return null
+                val endDay = dayToNum[dayRange.groupValues[2]] ?: return null
+                
+                val todayInRange = if (startDay <= endDay) {
+                    today in startDay..endDay
+                } else {
+                    today >= startDay || today <= endDay
+                }
+                
+                if (!todayInRange) {
+                    Log.d(TAG, "Conditional NU se aplica azi (zi $today, range $startDay-$endDay)")
+                    return null
+                }
+            }
+            
+            // Verifica ora
+            val timeMatch = Regex("(\\d{1,2}):(\\d{2})\\s*-\\s*(\\d{1,2}):(\\d{2})").find(condition)
             if (timeMatch != null) {
                 val startTotal = timeMatch.groupValues[1].toInt() * 60 + timeMatch.groupValues[2].toInt()
                 val endTotal = timeMatch.groupValues[3].toInt() * 60 + timeMatch.groupValues[4].toInt()
-                
-                val cal = java.util.Calendar.getInstance()
                 val nowTotal = cal.get(java.util.Calendar.HOUR_OF_DAY) * 60 + cal.get(java.util.Calendar.MINUTE)
                 
-                if (nowTotal in startTotal..endTotal) return conditionalSpeed
+                if (nowTotal in startTotal..endTotal) {
+                    Log.d(TAG, "Conditional ACTIV: $conditionalSpeed km/h")
+                    return conditionalSpeed
+                }
             }
             return null
         } catch (e: Exception) { return null }
