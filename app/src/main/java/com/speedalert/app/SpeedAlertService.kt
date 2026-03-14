@@ -26,6 +26,7 @@ import androidx.core.app.NotificationCompat
 import androidx.lifecycle.MutableLiveData
 import kotlinx.coroutines.*
 import org.json.JSONObject
+import org.json.JSONArray
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
@@ -57,66 +58,78 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private val handler = Handler(Looper.getMainLooper())
     
     private var cachedSpeedLimit = 0
-    private var lastQueryLat = 0.0
-    private var lastQueryLon = 0.0
     private var lastBearing = 0f
-    private var limitUpdateTime = 0L
-    private var lastQueryTime = 0L
     
-    // Stabilizare limită - 2 citiri la fel
-    private var pendingLimit = 0
-    private var pendingLimitCount = 0
-    private val CONFIRMATIONS_NEEDED = 2
+    // Cache local OSM - descarcat o singura data, cautat local
+    private data class RoadSegment(
+        val maxspeed: String,
+        val conditional: String,
+        val highway: String,
+        val points: List<Pair<Double, Double>>
+    )
+    private var roadCache = mutableListOf<RoadSegment>()
+    private var cacheCenterLat = 0.0
+    private var cacheCenterLon = 0.0
+    private var cacheLoading = false
     
     private var windowManager: WindowManager? = null
     private var floatingBubble: TextView? = null
     private var isBubbleShowing = false
     
-    // Flag pentru a aștepta limita nouă după viraj
     private var waitingForNewLimit = false
+    
+    // Mesaje comice
+    private val funnyWarnings = listOf(
+        "Boule! Incetineste ca iei amenda!",
+        "Ai prea multi bani in buzunar? Incetineste!",
+        "Nu ai ce face cu banii? Vrei sa-i dai la politie?",
+        "Vrei sa platesti amenda? Ca e scumpa!",
+        "Hei soferule! Franeaza odata!",
+        "Ce grabit esti! Incetineste!",
+        "Radar in fata! Glumesc, dar incetineste!",
+        "Portofelul tau plange! Incetineste!",
+        "Banii tai, amenda lor! Franeaza!"
+    )
+    
+    private var warnedOnce = false
 
     override fun onCreate() {
         super.onCreate()
-        tts = TextToSpeech(this, this)
-        locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
-        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        createNotificationChannel()
+        val notification = buildNotification("Se pornește...")
+        startForeground(NOTIFICATION_ID, notification)
         
-        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(
-            PowerManager.PARTIAL_WAKE_LOCK,
-            "SpeedAlert::LocationWakeLock"
-        )
+        tts = TextToSpeech(this, this)
+        locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
+        
+        val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SpeedAlert::WakeLock")
         wakeLock?.acquire()
         
-        createNotificationChannel()
-        createFloatingBubble()
+        windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
+        
+        statusLiveData.postValue("Pornit")
     }
-
+    
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIFICATION_ID, createNotification("Pornește..."))
         startLocationUpdates()
-        statusLiveData.postValue("Activ")
+        createFloatingBubble()
         return START_STICKY
     }
-
+    
+    override fun onBind(intent: Intent?): IBinder? = null
+    
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
-            val result = tts?.setLanguage(Locale("ro", "RO"))
-            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                tts?.setLanguage(Locale.GERMAN)
-            }
+            tts?.language = Locale("ro", "RO")
             ttsReady = true
-            tts?.setSpeechRate(1.0f)
-            
-            handler.postDelayed({
-                announceMessage("Avertizare viteză pornită")
-            }, 1000)
+            Log.d(TAG, "TTS Ready")
         }
     }
 
     private fun announceMessage(text: String) {
         if (ttsReady && tts != null) {
-            tts?.speak(text, TextToSpeech.QUEUE_ADD, null, "msg_${System.currentTimeMillis()}")
+            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "speed_${System.currentTimeMillis()}")
         }
     }
     
@@ -133,8 +146,8 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
                 locationManager.requestLocationUpdates(
                     LocationManager.GPS_PROVIDER,
-                    300L,  // Mai rapid - 300ms
-                    1f,    // 1 metru
+                    300L,
+                    1f,
                     this,
                     Looper.getMainLooper()
                 )
@@ -142,7 +155,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             
             statusLiveData.postValue("GPS Activ")
         } else {
-            statusLiveData.postValue("Lipsă permisiune GPS")
+            statusLiveData.postValue("Lipsa permisiune GPS")
         }
     }
 
@@ -153,236 +166,187 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         currentSpeedLiveData.postValue(speedKmh)
         locationLiveData.postValue(Pair(location.latitude, location.longitude))
         
-        // Detectează viraj (schimbare de direcție > 30 grade)
+        // Detecteaza viraj
         val bearingChange = Math.abs(currentBearing - lastBearing)
         val isTurning = bearingChange > 30 && bearingChange < 330 && lastBearing != 0f
         
         if (isTurning) {
             Log.d(TAG, "VIRAJ DETECTAT! Bearing change: $bearingChange")
-            // Resetează - așteaptă limita nouă înainte de a avertiza
             waitingForNewLimit = true
             isCurrentlySpeeding = false
             alreadyWarnedForThisZone = false
         }
         lastBearing = currentBearing
         
-        updateNotification("Viteză: ${speedKmh.toInt()} km/h | Limită: ${if (cachedSpeedLimit > 0) cachedSpeedLimit else "?"}")
+        updateNotification("Viteza: ${speedKmh.toInt()} km/h | Limita: ${if (cachedSpeedLimit > 0) cachedSpeedLimit else "?"}")
         updateFloatingBubble(speedKmh.toInt(), cachedSpeedLimit)
         
-        val distance = floatArrayOf(0f)
-        if (lastQueryLat != 0.0) {
-            Location.distanceBetween(lastQueryLat, lastQueryLon, location.latitude, location.longitude, distance)
+        // Descarca cache daca nu exista sau suntem departe
+        val distFromCache = floatArrayOf(0f)
+        if (cacheCenterLat != 0.0) {
+            Location.distanceBetween(cacheCenterLat, cacheCenterLon, location.latitude, location.longitude, distFromCache)
+        }
+        if ((roadCache.isEmpty() || distFromCache[0] > 3000) && !cacheLoading) {
+            loadRoadCache(location.latitude, location.longitude)
         }
         
-        // Minim 3 secunde intre query-uri (Overpass API rate limit)
-        val timeSinceLastQuery = System.currentTimeMillis() - lastQueryTime
-        val shouldQuery = (distance[0] > 30 || isTurning || cachedSpeedLimit <= 0 || lastQueryLat == 0.0) && timeSinceLastQuery > 3000
-        
-        if (shouldQuery) {
-            lastQueryLat = location.latitude
-            lastQueryLon = location.longitude
-            lastQueryTime = System.currentTimeMillis()
+        // Cauta limita LOCAL din cache (INSTANT, fara internet)
+        if (roadCache.isNotEmpty()) {
+            val limit = findNearestSpeedLimit(location.latitude, location.longitude)
             
-            serviceScope.launch {
-                try {
-                    val limit = getSpeedLimit(location.latitude, location.longitude)
-                    
-                    if (limit != null && limit > 0) {
-                        limitUpdateTime = System.currentTimeMillis()
-                        
-                        // STABILIZARE: 2 citiri la fel pentru a confirma
-                        if (limit == pendingLimit) {
-                            pendingLimitCount++
-                        } else {
-                            // Limită nouă - începe numărătoarea
-                            pendingLimit = limit
-                            pendingLimitCount = 1
-                        }
-                        
-                        // Anunță DOAR dacă avem 3 citiri consecutive la fel
-                        // SAU dacă e o schimbare MARE (diferență > 20 km/h) - probabil viraj
-                        val bigChange = Math.abs(limit - lastAnnouncedLimit) >= 20
-                        val confirmed = pendingLimitCount >= CONFIRMATIONS_NEEDED
-                        
-                        if ((confirmed || bigChange) && limit != lastAnnouncedLimit) {
-                            Log.d(TAG, "LIMITĂ CONFIRMATĂ: $limit (era: $lastAnnouncedLimit, citiri: $pendingLimitCount)")
-                            
-                            cachedSpeedLimit = limit
-                            speedLimitLiveData.postValue(limit)
-                            lastAnnouncedLimit = limit
-                            isCurrentlySpeeding = false
-                            alreadyWarnedForThisZone = false
-                            warnedOnce = false
-                            waitingForNewLimit = false
-                            pendingLimitCount = 0
-                            
-                            withContext(Dispatchers.Main) {
-                                announceMessage("Atenție! Limită de $limit")
-                            }
-                        } else if (limit == lastAnnouncedLimit) {
-                            // Limita e aceeași ca cea anunțată - OK
-                            cachedSpeedLimit = limit
-                            waitingForNewLimit = false
-                        }
-                        // Altfel, nu face nimic - așteaptă mai multe confirmări
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error: ${e.message}")
+            if (limit != null && limit > 0 && limit != lastAnnouncedLimit) {
+                Log.d(TAG, "LIMITA NOUA: $limit (era: $lastAnnouncedLimit)")
+                cachedSpeedLimit = limit
+                speedLimitLiveData.postValue(limit)
+                lastAnnouncedLimit = limit
+                isCurrentlySpeeding = false
+                alreadyWarnedForThisZone = false
+                warnedOnce = false
+                waitingForNewLimit = false
+                
+                handler.post {
+                    announceMessage("Atentie! Limita de $limit")
                 }
+            } else if (limit != null && limit > 0) {
+                cachedSpeedLimit = limit
+                waitingForNewLimit = false
             }
         }
         
-        // IMPORTANT: Nu avertiza pentru depășire dacă așteptăm limita nouă după viraj!
-        if (!waitingForNewLimit) {
+        // Verifica depasire
+        if (cachedSpeedLimit > 0 && !waitingForNewLimit) {
             checkSpeedingAndWarn(speedKmh, cachedSpeedLimit)
         }
     }
     
-    // Mesaje comice pentru depășire (6+ km/h)
-    private val funnyWarnings = listOf(
-        "Boule! Încetinește că iei amendă!",
-        "Ai prea mulți bani în buzunar? Încetinește!",
-        "Nu ai ce face cu banii? Vrei să-i dai la poliție?",
-        "Vrei să plătești amendă? Că e scumpă!",
-        "Hei șoferule! Frânează odată!",
-        "Încetinește că nu ești pe autobahn!",
-        "Ce grăbit ești! Încetinește!",
-        "Radar în față! Glumesc, dar încetinește!",
-        "Portofelul tău plânge! Încetinește!",
-        "Banii tăi, amenda lor! Frânează!"
-    )
-    
-    private var warnedOnce = false  // O singură avertizare per zonă
-    
-    private fun checkSpeedingAndWarn(speedKmh: Float, limit: Int) {
-        if (limit <= 0) return
-        
-        // Verifică dacă limita e proaspătă
-        val limitAge = System.currentTimeMillis() - limitUpdateTime
-        if (limitAge > 5000 && limitUpdateTime > 0) {
-            return
-        }
-        
-        val over = (speedKmh - limit).toInt()
-        
-        // Depășire 6+ km/h - mesaj COMIC (o singură dată!)
-        if (over >= 6) {
-            if (!warnedOnce) {
-                warnedOnce = true
-                isCurrentlySpeeding = true
-                alreadyWarnedForThisZone = true
-                announceUrgent(funnyWarnings.random())
-                updateNotification("⚠️ DEPĂȘIRE! ${speedKmh.toInt()} / $limit km/h")
-            }
-        } 
-        // Depășire 3-5 km/h - avertizare simplă (o singură dată!)
-        else if (over > 3) {
-            if (!warnedOnce) {
-                warnedOnce = true
-                isCurrentlySpeeding = true
-                announceMessage("Atenție, ai depășit limita.")
-                updateNotification("⚠️ ${speedKmh.toInt()} / $limit km/h")
-            }
-        } 
-        // Sub limită - resetează
-        else {
-            if (isCurrentlySpeeding) {
-                isCurrentlySpeeding = false
-                // NU resetăm warnedOnce - rămâne true până schimbă strada/zona
-            }
-        }
-    }
-
-    private fun getSpeedLimit(lat: Double, lon: Double): Int? {
-        return getSpeedLimitFromOSM(lat, lon)
-    }
-    
-    private fun getSpeedLimitFromOSM(lat: Double, lon: Double): Int? {
-        return try {
-            // Query simplu - cauta ORICE drum cu maxspeed in raza de 30m
-            val query = "[out:json][timeout:5];way(around:30,$lat,$lon)[maxspeed];out tags;"
-            val url = URL("https://overpass-api.de/api/interpreter")
-            val connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "POST"
-            connection.doOutput = true
-            connection.connectTimeout = 5000
-            connection.readTimeout = 5000
-            
-            connection.outputStream.write("data=${URLEncoder.encode(query, "UTF-8")}".toByteArray())
-            
-            val responseCode = connection.responseCode
-            if (responseCode != 200) {
-                Log.e(TAG, "OSM HTTP error: $responseCode")
+    // Descarca TOATE drumurile cu maxspeed in raza de 5km - O SINGURA CERERE
+    private fun loadRoadCache(lat: Double, lon: Double) {
+        cacheLoading = true
+        serviceScope.launch {
+            try {
+                Log.d(TAG, "DESCARC CACHE OSM pentru $lat,$lon ...")
+                statusLiveData.postValue("Se descarca harta...")
+                
+                val query = "[out:json][timeout:25];way(around:5000,$lat,$lon)[maxspeed];out body geom;"
+                val url = URL("https://overpass-api.de/api/interpreter")
+                val connection = url.openConnection() as HttpURLConnection
+                connection.requestMethod = "POST"
+                connection.doOutput = true
+                connection.connectTimeout = 30000
+                connection.readTimeout = 30000
+                
+                connection.outputStream.write("data=${URLEncoder.encode(query, "UTF-8")}".toByteArray())
+                
+                val responseCode = connection.responseCode
+                if (responseCode != 200) {
+                    Log.e(TAG, "OSM HTTP error: $responseCode")
+                    cacheLoading = false
+                    return@launch
+                }
+                
+                val response = connection.inputStream.bufferedReader().readText()
                 connection.disconnect()
-                return null
-            }
-            
-            val response = connection.inputStream.bufferedReader().readText()
-            connection.disconnect()
-            
-            val elements = JSONObject(response).optJSONArray("elements")
-            if (elements != null && elements.length() > 0) {
-                // Prioritate: drumuri principale > rezidentiale
-                var bestLimit = 0
-                var bestPriority = -1
                 
-                for (i in 0 until elements.length()) {
-                    val tags = elements.getJSONObject(i).optJSONObject("tags") ?: continue
-                    val highway = tags.optString("highway", "")
-                    val maxspeed = tags.optString("maxspeed", "")
-                    val conditional = tags.optString("maxspeed:conditional", "")
-                    
-                    val priority = when(highway) {
-                        "motorway" -> 6
-                        "trunk" -> 5
-                        "primary" -> 4
-                        "secondary" -> 3
-                        "tertiary" -> 2
-                        "residential", "living_street", "unclassified" -> 1
-                        else -> 0
-                    }
-                    
-                    // Verifica limita conditionala (cu orar)
-                    if (conditional.isNotEmpty()) {
-                        val condLimit = parseConditionalSpeed(conditional)
-                        if (condLimit != null && priority >= bestPriority) {
-                            bestLimit = condLimit
-                            bestPriority = priority
-                            continue
+                val elements = JSONObject(response).optJSONArray("elements")
+                val newCache = mutableListOf<RoadSegment>()
+                
+                if (elements != null) {
+                    for (i in 0 until elements.length()) {
+                        val elem = elements.getJSONObject(i)
+                        val tags = elem.optJSONObject("tags") ?: continue
+                        val geom = elem.optJSONArray("geometry") ?: continue
+                        
+                        val points = mutableListOf<Pair<Double, Double>>()
+                        for (j in 0 until geom.length()) {
+                            val p = geom.getJSONObject(j)
+                            points.add(Pair(p.getDouble("lat"), p.getDouble("lon")))
                         }
-                    }
-                    
-                    if (maxspeed == "none") {
-                        if (priority > bestPriority) {
-                            bestLimit = -1
-                            bestPriority = priority
-                        }
-                    } else {
-                        val match = Regex("(\\d+)").find(maxspeed)
-                        if (match != null) {
-                            val limit = match.groupValues[1].toInt()
-                            if (priority >= bestPriority) {
-                                bestLimit = limit
-                                bestPriority = priority
-                            }
+                        
+                        if (points.isNotEmpty()) {
+                            newCache.add(RoadSegment(
+                                maxspeed = tags.optString("maxspeed", ""),
+                                conditional = tags.optString("maxspeed:conditional", ""),
+                                highway = tags.optString("highway", ""),
+                                points = points
+                            ))
                         }
                     }
                 }
                 
-                if (bestLimit != 0) {
-                    Log.d(TAG, "OSM: limita=$bestLimit, prioritate=$bestPriority")
-                    return bestLimit
-                }
+                roadCache = newCache
+                cacheCenterLat = lat
+                cacheCenterLon = lon
+                Log.d(TAG, "CACHE GATA: ${newCache.size} drumuri")
+                statusLiveData.postValue("GPS Activ (${newCache.size} drumuri)")
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Cache error: ${e.message}")
             }
-            Log.d(TAG, "OSM: nimic gasit la $lat,$lon")
-            null
-        } catch (e: Exception) {
-            Log.e(TAG, "OSM error: ${e.message}")
-            null
+            cacheLoading = false
         }
     }
     
-    // Parseaza limite cu orar: "30 @ (Mo-Fr 07:00-18:30)"
+    // Cauta drumul cel mai aproape si returneaza limita (LOCAL, fara internet)
+    private fun findNearestSpeedLimit(lat: Double, lon: Double): Int? {
+        var bestDist = Double.MAX_VALUE
+        var bestLimit = 0
+        var bestPriority = -1
+        
+        for (road in roadCache) {
+            // Calculeaza distanta minima de la GPS la segmentele drumului
+            var minDist = Double.MAX_VALUE
+            for (point in road.points) {
+                val dlat = lat - point.first
+                val dlon = (lon - point.second) * Math.cos(Math.toRadians(lat))
+                val dist = Math.sqrt(dlat * dlat + dlon * dlon) * 111000 // in metri
+                if (dist < minDist) minDist = dist
+            }
+            
+            // Doar drumuri in raza de 30m
+            if (minDist > 30) continue
+            
+            val priority = when(road.highway) {
+                "motorway" -> 6
+                "trunk" -> 5
+                "primary" -> 4
+                "secondary" -> 3
+                "tertiary" -> 2
+                "residential", "living_street", "unclassified" -> 1
+                else -> 0
+            }
+            
+            // Preferam drumul cu prioritate mai mare, sau cel mai aproape la aceeasi prioritate
+            if (priority > bestPriority || (priority == bestPriority && minDist < bestDist)) {
+                // Verifica limita conditionala (cu orar)
+                if (road.conditional.isNotEmpty()) {
+                    val condLimit = parseConditionalSpeed(road.conditional)
+                    if (condLimit != null) {
+                        bestLimit = condLimit
+                        bestPriority = priority
+                        bestDist = minDist
+                        continue
+                    }
+                }
+                
+                if (road.maxspeed == "none") {
+                    bestLimit = -1
+                    bestPriority = priority
+                    bestDist = minDist
+                } else {
+                    val match = Regex("(\\d+)").find(road.maxspeed)
+                    if (match != null) {
+                        bestLimit = match.groupValues[1].toInt()
+                        bestPriority = priority
+                        bestDist = minDist
+                    }
+                }
+            }
+        }
+        
+        return if (bestLimit != 0) bestLimit else null
+    }
+    
+    // Parseaza limite cu orar: "30 @ (Mo-Fr 07:00-18:00)"
     private fun parseConditionalSpeed(conditional: String): Int? {
         try {
             val parts = conditional.split("@")
@@ -392,13 +356,11 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             val conditionalSpeed = speedMatch.groupValues[1].toInt()
             val condition = parts[1].trim()
             
-            val cal = java.util.Calendar.getInstance()
-            val today = cal.get(java.util.Calendar.DAY_OF_WEEK)
-            // Calendar: SUNDAY=1, MONDAY=2, ..., SATURDAY=7
+            val cal = Calendar.getInstance()
+            val today = cal.get(Calendar.DAY_OF_WEEK)
             
             val dayToNum = mapOf("Mo" to 2, "Tu" to 3, "We" to 4, "Th" to 5, "Fr" to 6, "Sa" to 7, "Su" to 1)
             
-            // Verifica zilele: "Mo-Fr", "Mo-Sa", etc.
             val dayRange = Regex("(Mo|Tu|We|Th|Fr|Sa|Su)-(Mo|Tu|We|Th|Fr|Sa|Su)").find(condition)
             if (dayRange != null) {
                 val startDay = dayToNum[dayRange.groupValues[1]] ?: return null
@@ -410,82 +372,52 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                     today >= startDay || today <= endDay
                 }
                 
-                if (!todayInRange) {
-                    Log.d(TAG, "Conditional NU se aplica azi (zi $today, range $startDay-$endDay)")
-                    return null
-                }
+                if (!todayInRange) return null
             }
             
-            // Verifica ora
             val timeMatch = Regex("(\\d{1,2}):(\\d{2})\\s*-\\s*(\\d{1,2}):(\\d{2})").find(condition)
             if (timeMatch != null) {
                 val startTotal = timeMatch.groupValues[1].toInt() * 60 + timeMatch.groupValues[2].toInt()
                 val endTotal = timeMatch.groupValues[3].toInt() * 60 + timeMatch.groupValues[4].toInt()
-                val nowTotal = cal.get(java.util.Calendar.HOUR_OF_DAY) * 60 + cal.get(java.util.Calendar.MINUTE)
+                val nowTotal = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
                 
-                if (nowTotal in startTotal..endTotal) {
-                    Log.d(TAG, "Conditional ACTIV: $conditionalSpeed km/h")
-                    return conditionalSpeed
-                }
+                if (nowTotal in startTotal..endTotal) return conditionalSpeed
             }
             return null
         } catch (e: Exception) { return null }
     }
-
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(CHANNEL_ID, "Speed Alert", NotificationManager.IMPORTANCE_LOW)
-            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-        }
-    }
-
-    private fun createNotification(content: String): Notification {
-        val intent = Intent(this, MainActivity::class.java)
-        val pendingIntent = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-        
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Speed Alert")
-            .setContentText(content)
-            .setSmallIcon(android.R.drawable.ic_menu_compass)
-            .setContentIntent(pendingIntent)
-            .setOngoing(true)
-            .build()
-    }
-
-    private fun updateNotification(content: String) {
-        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, createNotification(content))
-    }
     
-    private fun createFloatingBubble() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) return
+    private fun checkSpeedingAndWarn(speedKmh: Float, limit: Int) {
+        if (limit <= 0) return
         
-        try {
-            floatingBubble = TextView(this).apply {
-                text = "0"
-                textSize = 18f
-                setTextColor(Color.WHITE)
-                gravity = Gravity.CENTER
-                setPadding(20, 20, 20, 20)
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(Color.parseColor("#4CAF50"))
-                }
+        val over = speedKmh - limit
+        
+        if (over > 3) {
+            if (!isCurrentlySpeeding) {
+                isCurrentlySpeeding = true
+                alreadyWarnedForThisZone = false
+                warnedOnce = false
             }
             
-            val params = WindowManager.LayoutParams(
-                130, 130,
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-                else WindowManager.LayoutParams.TYPE_PHONE,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
-                PixelFormat.TRANSLUCENT
-            )
-            params.gravity = Gravity.TOP or Gravity.END
-            params.x = 20
-            params.y = 100
-            
-            windowManager?.addView(floatingBubble, params)
-            isBubbleShowing = true
-        } catch (e: Exception) { }
+            if (!alreadyWarnedForThisZone) {
+                alreadyWarnedForThisZone = true
+                
+                if (over >= 6 && !warnedOnce) {
+                    warnedOnce = true
+                    val warning = funnyWarnings.random()
+                    handler.post { announceUrgent(warning) }
+                } else if (!warnedOnce) {
+                    warnedOnce = true
+                    handler.post { announceUrgent("Ai depasit limita!") }
+                }
+            }
+        } else {
+            if (isCurrentlySpeeding) {
+                isCurrentlySpeeding = false
+                alreadyWarnedForThisZone = false
+                warnedOnce = false
+            }
+        }
     }
     
     private fun updateFloatingBubble(speed: Int, limit: Int) {
@@ -504,27 +436,90 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         }
     }
     
-    private fun removeFloatingBubble() {
+    private fun createFloatingBubble() {
+        if (isBubbleShowing) return
+        if (!Settings.canDrawOverlays(this)) return
+        
+        try {
+            val params = WindowManager.LayoutParams(
+                150, 150,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                else
+                    WindowManager.LayoutParams.TYPE_PHONE,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                PixelFormat.TRANSLUCENT
+            )
+            params.gravity = Gravity.TOP or Gravity.END
+            params.x = 20
+            params.y = 100
+            
+            val bubble = TextView(this)
+            bubble.text = "0"
+            bubble.textSize = 28f
+            bubble.setTextColor(Color.WHITE)
+            bubble.gravity = Gravity.CENTER
+            
+            val bg = GradientDrawable()
+            bg.shape = GradientDrawable.OVAL
+            bg.setColor(Color.parseColor("#2196F3"))
+            bubble.background = bg
+            
+            windowManager?.addView(bubble, params)
+            floatingBubble = bubble
+            isBubbleShowing = true
+        } catch (e: Exception) {
+            Log.e(TAG, "Bubble error: ${e.message}")
+        }
+    }
+    
+    private fun updateNotification(text: String) {
+        val notification = buildNotification(text)
+        val notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        notificationManager.notify(NOTIFICATION_ID, notification)
+    }
+    
+    private fun buildNotification(text: String): Notification {
+        val intent = Intent(this, MainActivity::class.java)
+        val pendingIntent = PendingIntent.getActivity(this, 0, intent, 
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("Speed Alert")
+            .setContentText(text)
+            .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+            .setContentIntent(pendingIntent)
+            .setOngoing(true)
+            .build()
+    }
+    
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Speed Alert",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.createNotificationChannel(channel)
+        }
+    }
+    
+    override fun onDestroy() {
+        super.onDestroy()
+        
         try {
             if (isBubbleShowing && floatingBubble != null) {
                 windowManager?.removeView(floatingBubble)
-                floatingBubble = null
                 isBubbleShowing = false
             }
-        } catch (e: Exception) { }
-    }
-
-    override fun onBind(intent: Intent?): IBinder? = null
-
-    override fun onDestroy() {
-        super.onDestroy()
-        removeFloatingBubble()
-        handler.removeCallbacksAndMessages(null)
+        } catch (e: Exception) {}
+        
         locationManager.removeUpdates(this)
         tts?.stop()
         tts?.shutdown()
+        wakeLock?.release()
         serviceScope.cancel()
-        wakeLock?.let { if (it.isHeld) it.release() }
         statusLiveData.postValue("Oprit")
     }
 }
