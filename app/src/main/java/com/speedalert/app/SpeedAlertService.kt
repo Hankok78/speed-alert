@@ -61,11 +61,12 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private var lastQueryLon = 0.0
     private var lastBearing = 0f
     private var limitUpdateTime = 0L
+    private var lastQueryTime = 0L
     
-    // Stabilizare limită - anunță doar când e confirmată
+    // Stabilizare limită - 2 citiri la fel
     private var pendingLimit = 0
     private var pendingLimitCount = 0
-    private val CONFIRMATIONS_NEEDED = 3  // Trebuie 3 citiri la fel pentru a confirma
+    private val CONFIRMATIONS_NEEDED = 2
     
     private var windowManager: WindowManager? = null
     private var floatingBubble: TextView? = null
@@ -173,12 +174,14 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             Location.distanceBetween(lastQueryLat, lastQueryLon, location.latitude, location.longitude, distance)
         }
         
-        // Verifică la 50 metri (OSM Overpass nu suportă query prea des)
-        val shouldQuery = distance[0] > 50 || isTurning || cachedSpeedLimit <= 0 || lastQueryLat == 0.0
+        // Minim 3 secunde intre query-uri (Overpass API rate limit)
+        val timeSinceLastQuery = System.currentTimeMillis() - lastQueryTime
+        val shouldQuery = (distance[0] > 30 || isTurning || cachedSpeedLimit <= 0 || lastQueryLat == 0.0) && timeSinceLastQuery > 3000
         
         if (shouldQuery) {
             lastQueryLat = location.latitude
             lastQueryLon = location.longitude
+            lastQueryTime = System.currentTimeMillis()
             
             serviceScope.launch {
                 try {
@@ -187,7 +190,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                     if (limit != null && limit > 0) {
                         limitUpdateTime = System.currentTimeMillis()
                         
-                        // STABILIZARE: Așteaptă 3 citiri la fel înainte de a anunța
+                        // STABILIZARE: 2 citiri la fel pentru a confirma
                         if (limit == pendingLimit) {
                             pendingLimitCount++
                         } else {
