@@ -165,7 +165,9 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     }
 
     override fun onLocationChanged(location: Location) {
-        val speedKmh = location.speed * 3.6f
+        val rawSpeedKmh = location.speed * 3.6f
+        // Sub 5 km/h = GPS drift, afisam 0
+        val speedKmh = if (rawSpeedKmh < 5f) 0f else rawSpeedKmh
         val currentBearing = location.bearing
         
         currentSpeedLiveData.postValue(speedKmh)
