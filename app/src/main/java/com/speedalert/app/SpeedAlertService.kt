@@ -84,15 +84,15 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     
     // Mesaje comice
     private val funnyWarnings = listOf(
-        "Boule! Incetineste ca iei amenda!",
-        "Ai prea multi bani in buzunar? Incetineste!",
-        "Nu ai ce face cu banii? Vrei sa-i dai la politie?",
-        "Vrei sa platesti amenda? Ca e scumpa!",
-        "Hei soferule! Franeaza odata!",
-        "Ce grabit esti! Incetineste!",
-        "Radar in fata! Glumesc, dar incetineste!",
-        "Portofelul tau plange! Incetineste!",
-        "Banii tai, amenda lor! Franeaza!"
+        "Boule! Încetinește că iei amendă!",
+        "Ai prea mulți bani în buzunar? Încetinește!",
+        "Nu ai ce face cu banii? Vrei să-i dai la poliție?",
+        "Vrei să plătești amendă? Că e scumpă!",
+        "Hei șoferule! Frânează odată!",
+        "Ce grăbit ești! Încetinește!",
+        "Radar în față! Glumesc, dar încetinește!",
+        "Portofelul tău plânge! Încetinește!",
+        "Banii tăi, amenda lor! Frânează!"
     )
     
     private var warnedOnce = false
@@ -100,7 +100,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        val notification = buildNotification("Se porneste...")
+        val notification = buildNotification("Se pornește...")
         startForeground(NOTIFICATION_ID, notification)
         
         tts = TextToSpeech(this, this)
@@ -118,6 +118,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startLocationUpdates()
         createFloatingBubble()
+        announceMessage("Serviciu pornit. Aștept locația GPS.")
         return START_STICKY
     }
     
@@ -159,7 +160,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             
             statusLiveData.postValue("GPS Activ")
         } else {
-            statusLiveData.postValue("Lipsa permisiune GPS")
+            statusLiveData.postValue("Lipsă permisiune GPS")
         }
     }
 
@@ -178,13 +179,15 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         if (isTurning) {
             Log.d(TAG, "VIRAJ DETECTAT! Bearing change: $normalizedChange")
             waitingForNewLimit = true
+            lastAnnouncedLimit = 0  // RESETARE - forteaza anuntarea pe drumul nou
+            cachedSpeedLimit = 0
             isCurrentlySpeeding = false
             alreadyWarnedForThisZone = false
         }
         lastBearing = currentBearing
         
         val limitText = when {
-            cachedSpeedLimit == NO_LIMIT -> "fara limita"
+            cachedSpeedLimit == NO_LIMIT -> "fără limită"
             cachedSpeedLimit > 0 -> "$cachedSpeedLimit"
             else -> "?"
         }
@@ -205,7 +208,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             val limit = findNearestSpeedLimit(location.latitude, location.longitude, currentBearing)
             
             if (limit != null && limit != lastAnnouncedLimit) {
-                Log.d(TAG, "LIMITA NOUA: $limit (era: $lastAnnouncedLimit)")
+                Log.d(TAG, "LIMITĂ NOUĂ: $limit (era: $lastAnnouncedLimit)")
                 cachedSpeedLimit = limit
                 speedLimitLiveData.postValue(limit)
                 lastAnnouncedLimit = limit
@@ -216,9 +219,9 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 
                 handler.post {
                     if (limit == NO_LIMIT) {
-                        announceMessage("Fara limita! Autostrada libera!")
+                        announceMessage("Fără limită! Autostradă liberă!")
                     } else {
-                        announceMessage("Atentie! Limita de $limit")
+                        announceMessage("Atenție! Limita $limit")
                     }
                 }
             } else if (limit != null) {
@@ -239,7 +242,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         serviceScope.launch {
             try {
                 Log.d(TAG, "DESCARC CACHE OSM pentru $lat,$lon ...")
-                statusLiveData.postValue("Se descarca harta...")
+                statusLiveData.postValue("Se descarcă harta...")
                 
                 // Descarcam si drumuri FARA maxspeed explicit pt a aplica limite implicite
                 val query = """
@@ -264,7 +267,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 val responseCode = connection.responseCode
                 if (responseCode != 200) {
                     Log.e(TAG, "OSM HTTP error: $responseCode")
-                    statusLiveData.postValue("Eroare descarcare: $responseCode")
+                    statusLiveData.postValue("Eroare descărcare: $responseCode")
                     cacheLoading = false
                     return@launch
                 }
@@ -549,7 +552,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                     handler.post { announceUrgent(warning) }
                 } else if (!warnedOnce) {
                     warnedOnce = true
-                    handler.post { announceUrgent("Ai depasit limita!") }
+                    handler.post { announceUrgent("Ai depășit limita!") }
                 }
             }
         } else {
