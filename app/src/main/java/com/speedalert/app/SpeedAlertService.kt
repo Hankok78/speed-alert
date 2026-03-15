@@ -30,6 +30,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.util.*
+import android.app.AlarmManager
 import android.graphics.drawable.GradientDrawable
 import kotlin.math.*
 
@@ -116,6 +117,12 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     }
     
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Re-acquire wakelock in caz ca sistemul a repornit serviciul
+        if (wakeLock?.isHeld != true) {
+            val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SpeedAlert::WakeLock")
+            wakeLock?.acquire()
+        }
         startLocationUpdates()
         createFloatingBubble()
         announceMessage("Serviciu pornit. Aștept locația GPS.")
@@ -645,8 +652,10 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "Speed Alert",
-                NotificationManager.IMPORTANCE_LOW
+                NotificationManager.IMPORTANCE_DEFAULT
             )
+            channel.setSound(null, null)
+            channel.enableVibration(false)
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(channel)
         }
@@ -668,5 +677,14 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         wakeLock?.release()
         serviceScope.cancel()
         statusLiveData.postValue("Oprit")
+        
+        // Repornire automată dacă sistemul oprește serviciul
+        val restartIntent = Intent(applicationContext, SpeedAlertService::class.java)
+        val pendingIntent = PendingIntent.getService(
+            applicationContext, 1, restartIntent,
+            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        alarmManager.set(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 3000, pendingIntent)
     }
 }

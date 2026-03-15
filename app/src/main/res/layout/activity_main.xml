@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootLayout"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
@@ -7,6 +8,7 @@
 
     <!-- Header cu viteza -->
     <LinearLayout
+        android:id="@+id/headerLayout"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
@@ -33,9 +35,10 @@
                     android:textColor="#ffffff"
                     android:textStyle="bold" />
                 <TextView
+                    android:id="@+id/tvLimitLabel"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="LIMITĂ"
+                    android:text="LIMITA"
                     android:textSize="8sp"
                     android:textColor="#aaaaaa" />
             </LinearLayout>
@@ -58,6 +61,7 @@
                 android:textColor="#00d9ff"
                 android:textStyle="bold" />
             <TextView
+                android:id="@+id/tvKmhLabel"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="km/h"
@@ -65,18 +69,35 @@
                 android:textColor="#888888" />
         </LinearLayout>
 
-        <!-- Status -->
-        <TextView
-            android:id="@+id/tvStatus"
+        <!-- Status + Buton Noapte -->
+        <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Oprit"
-            android:textSize="12sp"
-            android:textColor="#888888"
-            android:padding="8dp" />
+            android:orientation="vertical"
+            android:gravity="center">
+            <TextView
+                android:id="@+id/tvStatus"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Oprit"
+                android:textSize="11sp"
+                android:textColor="#888888"
+                android:padding="4dp" />
+            <Button
+                android:id="@+id/btnNightMode"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:text="NOAPTE"
+                android:textSize="10sp"
+                android:textColor="#ffffff"
+                android:backgroundTint="#555555"
+                android:minWidth="0dp"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp" />
+        </LinearLayout>
     </LinearLayout>
 
-    <!-- Harta TomTom (WebView) -->
+    <!-- Harta OpenStreetMap -->
     <WebView
         android:id="@+id/mapWebView"
         android:layout_width="match_parent"
@@ -85,6 +106,7 @@
 
     <!-- Butoane -->
     <LinearLayout
+        android:id="@+id/footerLayout"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
@@ -97,7 +119,7 @@
             android:layout_width="0dp"
             android:layout_weight="1"
             android:layout_height="56dp"
-            android:text="▶ PORNEȘTE"
+            android:text="PORNESTE"
             android:textColor="#ffffff"
             android:backgroundTint="#00cc66"
             android:layout_marginEnd="8dp" />
@@ -107,7 +129,7 @@
             android:layout_width="0dp"
             android:layout_weight="1"
             android:layout_height="56dp"
-            android:text="⬛ OPREȘTE"
+            android:text="OPRESTE"
             android:textColor="#ffffff"
             android:backgroundTint="#ff4444"
             android:enabled="false" />
