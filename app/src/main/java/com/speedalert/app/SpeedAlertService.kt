@@ -85,6 +85,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private var isBubbleShowing = false
     
     private var waitingForNewLimit = false
+    private var lastAnnounceTime = 0L
     
     private val translations = mapOf(
         "ro" to mapOf(
@@ -245,10 +246,10 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         currentSpeedLiveData.postValue(speedKmh)
         locationLiveData.postValue(Pair(location.latitude, location.longitude))
         
-        // Detecteaza viraj
+        // Detecteaza viraj - doar schimbari mari de directie (45+ grade)
         val bearingChange = abs(currentBearing - lastBearing)
         val normalizedChange = if (bearingChange > 180) 360 - bearingChange else bearingChange
-        val isTurning = normalizedChange > 30 && lastBearing != 0f
+        val isTurning = normalizedChange > 45 && lastBearing != 0f && speedKmh > 5f
         
         if (isTurning) {
             Log.d(TAG, "VIRAJ DETECTAT! Bearing change: $normalizedChange")
@@ -280,23 +281,35 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         // Cauta limita LOCAL din cache
         if (roadCache.isNotEmpty()) {
             val limit = findNearestSpeedLimit(location.latitude, location.longitude, currentBearing)
+            val now = System.currentTimeMillis()
             
             if (limit != null && limit != lastAnnouncedLimit) {
-                Log.d(TAG, "LIMITA NOUA: $limit (era: $lastAnnouncedLimit)")
-                cachedSpeedLimit = limit
-                speedLimitLiveData.postValue(limit)
-                lastAnnouncedLimit = limit
-                isCurrentlySpeeding = false
-                alreadyWarnedForThisZone = false
-                warnedOnce = false
-                waitingForNewLimit = false
-                
-                handler.post {
-                    if (limit == NO_LIMIT) {
-                        announceMessage(t("no_limit"))
-                    } else {
-                        announceMessage(String.format(t("limit"), limit))
+                // Limita diferita - anunta doar daca au trecut 10 sec de la ultimul anunt
+                val timeSinceLastAnnounce = now - lastAnnounceTime
+                if (timeSinceLastAnnounce > 10000 || lastAnnounceTime == 0L) {
+                    Log.d(TAG, "LIMITA NOUA: $limit (era: $lastAnnouncedLimit)")
+                    cachedSpeedLimit = limit
+                    speedLimitLiveData.postValue(limit)
+                    lastAnnouncedLimit = limit
+                    lastAnnounceTime = now
+                    isCurrentlySpeeding = false
+                    alreadyWarnedForThisZone = false
+                    warnedOnce = false
+                    waitingForNewLimit = false
+                    
+                    handler.post {
+                        if (limit == NO_LIMIT) {
+                            announceMessage(t("no_limit"))
+                        } else {
+                            announceMessage(String.format(t("limit"), limit))
+                        }
                     }
+                } else {
+                    // Actualizeaza intern dar nu anunta inca
+                    cachedSpeedLimit = limit
+                    speedLimitLiveData.postValue(limit)
+                    lastAnnouncedLimit = limit
+                    waitingForNewLimit = false
                 }
             } else if (limit != null) {
                 cachedSpeedLimit = limit
