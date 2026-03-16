@@ -392,62 +392,46 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         return if (diff > 180) 360 - diff else diff
     }
     
+    // SIMPLU: gaseste cel mai apropiat drum cu limita de viteza
     private fun findNearestSpeedLimit(lat: Double, lon: Double, gpsBearing: Float): Int? {
-        var bestScore = -1.0
-        var bestLimit = 0
-        val hasBearing = gpsBearing != 0f
+        var bestDist = Double.MAX_VALUE
+        var bestLimit: Int? = null
         
         for (road in roadCache) {
+            // Calculeaza distanta minima la drum
             var minDist = Double.MAX_VALUE
-            var closestSegBearing = 0.0
-            
             for (i in 0 until road.points.size - 1) {
                 val p1 = road.points[i]
                 val p2 = road.points[i + 1]
                 val dist = distanceToSegment(lat, lon, p1.first, p1.second, p2.first, p2.second)
-                if (dist < minDist) {
-                    minDist = dist
-                    closestSegBearing = segmentBearing(p1.first, p1.second, p2.first, p2.second)
-                }
+                if (dist < minDist) minDist = dist
             }
             
-            if (minDist > 40) continue
+            // Doar drumuri in raza de 50m
+            if (minDist > 50) continue
             
-            val priority = when(road.highway) {
-                "motorway" -> 6.0
-                "trunk" -> 5.0
-                "primary" -> 4.0
-                "secondary" -> 3.0
-                "tertiary" -> 2.0
-                "residential", "living_street", "unclassified" -> 1.0
+            // Rezolva limita
+            val limit = resolveSpeedLimit(road)
+            if (limit == null) continue
+            
+            // Prioritate: drum mai important castiga la distante similare
+            val priorityBonus = when(road.highway) {
+                "motorway" -> -15.0
+                "trunk" -> -12.0
+                "primary" -> -10.0
+                "secondary" -> -7.0
+                "tertiary" -> -5.0
                 else -> 0.0
             }
+            val adjustedDist = minDist + priorityBonus
             
-            var bearingMatch = 1.0
-            if (hasBearing) {
-                val diff1 = bearingDiff(gpsBearing.toDouble(), closestSegBearing)
-                val diff2 = bearingDiff(gpsBearing.toDouble(), (closestSegBearing + 180) % 360)
-                val bestBearingDiff = min(diff1, diff2)
-                
-                if (bestBearingDiff > 60) {
-                    bearingMatch = 0.1
-                } else {
-                    bearingMatch = 1.0 - (bestBearingDiff / 90.0) * 0.5
-                }
-            }
-            
-            val score = (priority + 1) * bearingMatch * (1.0 / (minDist + 1.0)) * 1000
-            
-            if (score > bestScore) {
-                val limit = resolveSpeedLimit(road)
-                if (limit != null) {
-                    bestLimit = limit
-                    bestScore = score
-                }
+            if (adjustedDist < bestDist) {
+                bestDist = adjustedDist
+                bestLimit = limit
             }
         }
         
-        return if (bestLimit != 0) bestLimit else null
+        return bestLimit
     }
     
     private fun resolveSpeedLimit(road: RoadSegment): Int? {
