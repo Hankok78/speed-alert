@@ -306,6 +306,7 @@ currentLayer.addTo(map);
             return
         }
         
+        SpeedAlertService.stoppedByUser = false
         val intent = Intent(this, SpeedAlertService::class.java)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             startForegroundService(intent)
@@ -317,6 +318,7 @@ currentLayer.addTo(map);
     }
 
     private fun stopService() {
+        SpeedAlertService.stoppedByUser = true
         val intent = Intent(this, SpeedAlertService::class.java)
         stopService(intent)
         btnStart.isEnabled = true

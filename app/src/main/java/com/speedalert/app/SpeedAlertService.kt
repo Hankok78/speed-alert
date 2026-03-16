@@ -46,8 +46,10 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         private const val NOTIFICATION_ID = 1
         private const val TAG = "SpeedAlert"
         
-        // -1 inseamna "fara limita" (Autobahn)
         const val NO_LIMIT = -1
+        
+        // Flag: true = userul a oprit manual, nu reporneste
+        var stoppedByUser = false
     }
 
     private var tts: TextToSpeech? = null
@@ -678,13 +680,16 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         serviceScope.cancel()
         statusLiveData.postValue("Oprit")
         
-        // Repornire automată dacă sistemul oprește serviciul
-        val restartIntent = Intent(applicationContext, SpeedAlertService::class.java)
-        val pendingIntent = PendingIntent.getService(
-            applicationContext, 1, restartIntent,
-            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        alarmManager.set(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 3000, pendingIntent)
+        // Repornire DOAR daca sistemul a oprit serviciul, NU daca userul a apasat OPRESTE
+        if (!stoppedByUser) {
+            val restartIntent = Intent(applicationContext, SpeedAlertService::class.java)
+            val pendingIntent = PendingIntent.getService(
+                applicationContext, 1, restartIntent,
+                PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            alarmManager.set(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 3000, pendingIntent)
+        }
+        stoppedByUser = false
     }
 }
