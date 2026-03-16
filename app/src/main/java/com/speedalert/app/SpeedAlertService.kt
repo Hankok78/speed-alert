@@ -61,8 +61,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private var ttsReady = false
     private val serviceScope = CoroutineScope(Dispatchers.IO + Job())
     
-    private var isCurrentlySpeeding = false
-    private var alreadyWarnedForThisZone = false
+    private var speedingWarned = false
     private val handler = Handler(Looper.getMainLooper())
     
     private var cachedSpeedLimit = 0
@@ -83,9 +82,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private var windowManager: WindowManager? = null
     private var floatingBubble: TextView? = null
     private var isBubbleShowing = false
-    
-    private var waitingForNewLimit = false
-    private var lastAnnounceTime = 0L
     
     private val translations = mapOf(
         "ro" to mapOf(
@@ -122,33 +118,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             "started" to "Started"
         )
     )
-    
-    private val funnyWarnings = mapOf(
-        "ro" to listOf(
-            "Boule! Încetinește că iei amendă!",
-            "Ai prea mulți bani în buzunar? Încetinește!",
-            "Vrei să plătești amendă? Că e scumpă!",
-            "Hei șoferule! Frânează odată!",
-            "Ce grăbit ești! Încetinește!",
-            "Portofelul tău plânge! Încetinește!"
-        ),
-        "de" to listOf(
-            "Hey! Langsamer! Sonst wird's teuer!",
-            "Willst du ein Bußgeld? Fahr langsamer!",
-            "Dein Geldbeutel weint! Bremsen!",
-            "Zu schnell! Das kostet Punkte!",
-            "Fuß vom Gas! Sofort!"
-        ),
-        "en" to listOf(
-            "Slow down! You'll get a ticket!",
-            "Got money to burn? Slow down!",
-            "Your wallet is crying! Brake!",
-            "Ease off the gas! Now!",
-            "Too fast! That's a fine waiting to happen!"
-        )
-    )
-    
-    private var warnedOnce = false
     
     private fun t(key: String): String {
         return translations[currentLanguage]?.get(key) ?: translations["en"]?.get(key) ?: key
@@ -245,20 +214,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         
         currentSpeedLiveData.postValue(speedKmh)
         locationLiveData.postValue(Pair(location.latitude, location.longitude))
-        
-        // Detecteaza viraj - doar schimbari mari de directie (45+ grade)
-        val bearingChange = abs(currentBearing - lastBearing)
-        val normalizedChange = if (bearingChange > 180) 360 - bearingChange else bearingChange
-        val isTurning = normalizedChange > 45 && lastBearing != 0f && speedKmh > 5f
-        
-        if (isTurning) {
-            Log.d(TAG, "VIRAJ DETECTAT! Bearing change: $normalizedChange")
-            waitingForNewLimit = true
-            lastAnnouncedLimit = 0
-            cachedSpeedLimit = 0
-            isCurrentlySpeeding = false
-            alreadyWarnedForThisZone = false
-        }
         lastBearing = currentBearing
         
         val limitText = when {
@@ -278,48 +233,36 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             loadRoadCache(location.latitude, location.longitude)
         }
         
-        // Cauta limita LOCAL din cache
+        // Cauta limita LOCAL din cache - SIMPLU
         if (roadCache.isNotEmpty()) {
             val limit = findNearestSpeedLimit(location.latitude, location.longitude, currentBearing)
-            val now = System.currentTimeMillis()
             
             if (limit != null && limit != lastAnnouncedLimit) {
-                // Limita diferita - anunta doar daca au trecut 10 sec de la ultimul anunt
-                val timeSinceLastAnnounce = now - lastAnnounceTime
-                if (timeSinceLastAnnounce > 10000 || lastAnnounceTime == 0L) {
-                    Log.d(TAG, "LIMITA NOUA: $limit (era: $lastAnnouncedLimit)")
-                    cachedSpeedLimit = limit
-                    speedLimitLiveData.postValue(limit)
-                    lastAnnouncedLimit = limit
-                    lastAnnounceTime = now
-                    isCurrentlySpeeding = false
-                    alreadyWarnedForThisZone = false
-                    warnedOnce = false
-                    waitingForNewLimit = false
-                    
-                    handler.post {
-                        if (limit == NO_LIMIT) {
-                            announceMessage(t("no_limit"))
-                        } else {
-                            announceMessage(String.format(t("limit"), limit))
-                        }
+                // Limita s-a schimbat! Anunta imediat.
+                Log.d(TAG, "LIMITA NOUA: $limit (era: $lastAnnouncedLimit)")
+                cachedSpeedLimit = limit
+                speedLimitLiveData.postValue(limit)
+                lastAnnouncedLimit = limit
+                speedingWarned = false
+                
+                handler.post {
+                    if (limit == NO_LIMIT) {
+                        announceMessage(t("no_limit"))
+                    } else {
+                        announceMessage(String.format(t("limit"), limit))
                     }
-                } else {
-                    // Actualizeaza intern dar nu anunta inca
-                    cachedSpeedLimit = limit
-                    speedLimitLiveData.postValue(limit)
-                    lastAnnouncedLimit = limit
-                    waitingForNewLimit = false
                 }
             } else if (limit != null) {
                 cachedSpeedLimit = limit
-                waitingForNewLimit = false
             }
         }
         
-        // Verifica depasire
-        if (cachedSpeedLimit > 0 && !waitingForNewLimit) {
-            checkSpeedingAndWarn(speedKmh, cachedSpeedLimit)
+        // Avertizare depasire - simplu, o singura data
+        if (cachedSpeedLimit > 0 && speedKmh > cachedSpeedLimit + 3 && !speedingWarned) {
+            speedingWarned = true
+            handler.post { announceUrgent(t("speeding")) }
+        } else if (cachedSpeedLimit > 0 && speedKmh <= cachedSpeedLimit) {
+            speedingWarned = false
         }
     }
     
@@ -568,36 +511,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         } catch (e: Exception) {
             Log.e(TAG, "Conditional parse error: ${e.message}")
             return null
-        }
-    }
-    
-    private fun checkSpeedingAndWarn(speedKmh: Float, limit: Int) {
-        if (limit <= 0) return
-        val over = speedKmh - limit
-        
-        if (over > 3) {
-            if (!isCurrentlySpeeding) {
-                isCurrentlySpeeding = true
-                alreadyWarnedForThisZone = false
-                warnedOnce = false
-            }
-            if (!alreadyWarnedForThisZone) {
-                alreadyWarnedForThisZone = true
-                if (over >= 6 && !warnedOnce) {
-                    warnedOnce = true
-                    val warnings = funnyWarnings[currentLanguage] ?: funnyWarnings["en"]!!
-                    handler.post { announceUrgent(warnings.random()) }
-                } else if (!warnedOnce) {
-                    warnedOnce = true
-                    handler.post { announceUrgent(t("speeding")) }
-                }
-            }
-        } else {
-            if (isCurrentlySpeeding) {
-                isCurrentlySpeeding = false
-                alreadyWarnedForThisZone = false
-                warnedOnce = false
-            }
         }
     }
     
