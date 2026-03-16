@@ -86,17 +86,7 @@
                 android:textColor="#888888"
                 android:padding="2dp" />
             
-            <!-- Indicator zona scolara -->
-            <TextView
-                android:id="@+id/tvSchoolZone"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="SCOALA"
-                android:textSize="9sp"
-                android:textColor="#FF6F00"
-                android:textStyle="bold"
-                android:visibility="gone"
-                android:padding="2dp" />
+            <!-- Indicator zona scolara - DEZACTIVAT -->
             
             <LinearLayout
                 android:layout_width="wrap_content"

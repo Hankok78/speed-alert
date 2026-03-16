@@ -42,7 +42,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         val currentSpeedLiveData = MutableLiveData<Float>()
         val statusLiveData = MutableLiveData<String>()
         val locationLiveData = MutableLiveData<Pair<Double, Double>>()
-        val schoolZoneLiveData = MutableLiveData<Boolean>()
         
         private const val CHANNEL_ID = "SpeedAlertChannel"
         private const val NOTIFICATION_ID = 1
@@ -51,9 +50,8 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         const val NO_LIMIT = -1
         var stoppedByUser = false
         
-        // Setari controlate din MainActivity
         var currentLanguage = "ro"
-        var ttsVolume = 1.0f  // 0.0 - 1.0
+        var ttsVolume = 1.0f
     }
 
     private var tts: TextToSpeech? = null
@@ -70,7 +68,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private var cachedSpeedLimit = 0
     private var lastBearing = 0f
     
-    // Cache local OSM - drumuri
     private data class RoadSegment(
         val maxspeed: String,
         val conditional: String,
@@ -83,26 +80,17 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private var cacheCenterLon = 0.0
     private var cacheLoading = false
     
-    // Cache zone scolare
-    private data class SchoolLocation(val lat: Double, val lon: Double, val name: String)
-    private var schoolCache = mutableListOf<SchoolLocation>()
-    private var nearSchool = false
-    private var schoolWarned = false
-    
     private var windowManager: WindowManager? = null
     private var floatingBubble: TextView? = null
     private var isBubbleShowing = false
     
     private var waitingForNewLimit = false
     
-    // Traduceri
     private val translations = mapOf(
         "ro" to mapOf(
             "limit" to "Atenție! Limita %d",
             "no_limit" to "Fără limită! Autostradă liberă!",
             "speeding" to "Ai depășit limita!",
-            "school_zone" to "Atenție! Zonă școlară! Încetinește!",
-            "school_clear" to "Ai ieșit din zona școlară.",
             "service_start" to "Serviciu pornit.",
             "downloading" to "Se descarcă harta...",
             "gps_active" to "GPS Activ",
@@ -114,8 +102,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             "limit" to "Achtung! Tempolimit %d",
             "no_limit" to "Kein Tempolimit! Freie Autobahn!",
             "speeding" to "Geschwindigkeitslimit überschritten!",
-            "school_zone" to "Achtung! Schulzone! Langsam fahren!",
-            "school_clear" to "Schulzone verlassen.",
             "service_start" to "Dienst gestartet.",
             "downloading" to "Karte wird geladen...",
             "gps_active" to "GPS Aktiv",
@@ -127,8 +113,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             "limit" to "Warning! Speed limit %d",
             "no_limit" to "No speed limit! Open highway!",
             "speeding" to "Speed limit exceeded!",
-            "school_zone" to "Warning! School zone! Slow down!",
-            "school_clear" to "Leaving school zone.",
             "service_start" to "Service started.",
             "downloading" to "Downloading map...",
             "gps_active" to "GPS Active",
@@ -138,7 +122,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         )
     )
     
-    // Mesaje comice per limba
     private val funnyWarnings = mapOf(
         "ro" to listOf(
             "Boule! Încetinește că iei amendă!",
@@ -217,10 +200,6 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             Log.d(TAG, "TTS Ready")
         }
     }
-    
-    fun updateTtsLanguage() {
-        tts?.language = ttsLocale()
-    }
 
     private fun announceMessage(text: String) {
         if (ttsReady && tts != null) {
@@ -286,7 +265,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             cachedSpeedLimit > 0 -> "$cachedSpeedLimit"
             else -> "?"
         }
-        updateNotification("${speedKmh.toInt()} km/h | $limitText${if (nearSchool) " [S]" else ""}")
+        updateNotification("${speedKmh.toInt()} km/h | $limitText")
         updateFloatingBubble(speedKmh.toInt(), cachedSpeedLimit)
         
         // Descarca cache daca nu exista sau suntem departe
@@ -325,42 +304,13 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             }
         }
         
-        // Verifica zona scolara
-        checkSchoolZone(location.latitude, location.longitude)
-        
         // Verifica depasire
         if (cachedSpeedLimit > 0 && !waitingForNewLimit) {
             checkSpeedingAndWarn(speedKmh, cachedSpeedLimit)
         }
     }
     
-    // Verifica daca suntem langa o scoala
-    private fun checkSchoolZone(lat: Double, lon: Double) {
-        var foundNearSchool = false
-        
-        for (school in schoolCache) {
-            val dist = floatArrayOf(0f)
-            Location.distanceBetween(lat, lon, school.lat, school.lon, dist)
-            if (dist[0] < 150) {
-                foundNearSchool = true
-                break
-            }
-        }
-        
-        if (foundNearSchool && !nearSchool) {
-            nearSchool = true
-            schoolWarned = true
-            schoolZoneLiveData.postValue(true)
-            handler.post { announceUrgent(t("school_zone")) }
-        } else if (!foundNearSchool && nearSchool) {
-            nearSchool = false
-            schoolWarned = false
-            schoolZoneLiveData.postValue(false)
-            handler.post { announceMessage(t("school_clear")) }
-        }
-    }
-    
-    // Descarca drumuri + scoli in raza de 5km
+    // Query-ul SIMPLU care functiona - DOAR drumuri, fara scoli
     private fun loadRoadCache(lat: Double, lon: Double) {
         cacheLoading = true
         serviceScope.launch {
@@ -368,19 +318,10 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 Log.d(TAG, "DESCARC CACHE OSM pentru $lat,$lon ...")
                 statusLiveData.postValue(t("downloading"))
                 
-                val query = """
-                    [out:json][timeout:30];
-                    (
-                      way(around:5000,$lat,$lon)["highway"~"motorway|trunk|primary|secondary|tertiary|residential|living_street|unclassified"]["maxspeed"];
-                      way(around:5000,$lat,$lon)["highway"~"motorway|trunk|primary|secondary|tertiary|residential|living_street|unclassified"][!"maxspeed"];
-                    );
-                    out body geom;
-                    (
-                      node(around:5000,$lat,$lon)["amenity"="school"];
-                      way(around:5000,$lat,$lon)["amenity"="school"];
-                    );
-                    out center;
-                """.trimIndent()
+                val query = "[out:json][timeout:25];(" +
+                    "way(around:5000,$lat,$lon)[\"highway\"~\"motorway|trunk|primary|secondary|tertiary|residential|living_street|unclassified\"][\"maxspeed\"];" +
+                    "way(around:5000,$lat,$lon)[\"highway\"~\"motorway|trunk|primary|secondary|tertiary|residential|living_street|unclassified\"][!\"maxspeed\"];" +
+                    ");out body geom;"
                 
                 val url = URL("https://overpass-api.de/api/interpreter")
                 val connection = url.openConnection() as HttpURLConnection
@@ -405,35 +346,11 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 
                 val elements = JSONObject(response).optJSONArray("elements")
                 val newRoads = mutableListOf<RoadSegment>()
-                val newSchools = mutableListOf<SchoolLocation>()
                 
                 if (elements != null) {
                     for (i in 0 until elements.length()) {
                         val elem = elements.getJSONObject(i)
-                        val tags = elem.optJSONObject("tags")
-                        val elemType = elem.optString("type", "")
-                        
-                        // Este scoala? (din out center - node cu lat/lon sau way cu center)
-                        if (tags?.optString("amenity") == "school") {
-                            val schoolName = tags.optString("name", "Scoala")
-                            if (elem.has("lat") && elem.has("lon")) {
-                                newSchools.add(SchoolLocation(elem.getDouble("lat"), elem.getDouble("lon"), schoolName))
-                            } else if (elem.has("center")) {
-                                val center = elem.getJSONObject("center")
-                                newSchools.add(SchoolLocation(center.getDouble("lat"), center.getDouble("lon"), schoolName))
-                            }
-                            continue
-                        }
-                        
-                        // Scoala fara tags (din out center minimal)
-                        if (tags == null && elem.has("center")) {
-                            val center = elem.getJSONObject("center")
-                            newSchools.add(SchoolLocation(center.getDouble("lat"), center.getDouble("lon"), "Scoala"))
-                            continue
-                        }
-                        
-                        // Este drum (din out body geom)
-                        if (tags == null) continue
+                        val tags = elem.optJSONObject("tags") ?: continue
                         val geom = elem.optJSONArray("geometry") ?: continue
                         
                         val points = mutableListOf<Pair<Double, Double>>()
@@ -455,11 +372,10 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 }
                 
                 roadCache = newRoads
-                schoolCache = newSchools
                 cacheCenterLat = lat
                 cacheCenterLon = lon
-                Log.d(TAG, "CACHE: ${newRoads.size} drumuri, ${newSchools.size} scoli")
-                statusLiveData.postValue("${t("gps_active")} (${newRoads.size}+${newSchools.size})")
+                Log.d(TAG, "CACHE: ${newRoads.size} drumuri")
+                statusLiveData.postValue("${t("gps_active")} (${newRoads.size})")
                 
             } catch (e: Exception) {
                 Log.e(TAG, "Cache error: ${e.message}")
@@ -678,12 +594,11 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 bubble.text = "$speed"
                 (bubble.background as? GradientDrawable)?.setColor(
                     when {
-                        nearSchool -> Color.parseColor("#FF6F00")             // Portocaliu - zona scolara
-                        limit == NO_LIMIT -> Color.parseColor("#9C27B0")     // Violet - Autobahn
-                        limit <= 0 -> Color.parseColor("#2196F3")            // Albastru - se incarca
-                        speed > limit + 5 -> Color.parseColor("#F44336")     // Rosu
-                        speed > limit -> Color.parseColor("#FF9800")         // Portocaliu
-                        else -> Color.parseColor("#4CAF50")                  // Verde
+                        limit == NO_LIMIT -> Color.parseColor("#9C27B0")
+                        limit <= 0 -> Color.parseColor("#2196F3")
+                        speed > limit + 5 -> Color.parseColor("#F44336")
+                        speed > limit -> Color.parseColor("#FF9800")
+                        else -> Color.parseColor("#4CAF50")
                     }
                 )
             }

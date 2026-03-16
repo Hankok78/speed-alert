@@ -29,7 +29,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvSpeedLimit: TextView
     private lateinit var tvCurrentSpeed: TextView
     private lateinit var tvStatus: TextView
-    private lateinit var tvSchoolZone: TextView
     private lateinit var tvKmhLabel: TextView
     private lateinit var tvLimitLabel: TextView
     private lateinit var tvVolLabel: TextView
@@ -68,7 +67,6 @@ class MainActivity : AppCompatActivity() {
         tvSpeedLimit = findViewById(R.id.tvSpeedLimit)
         tvCurrentSpeed = findViewById(R.id.tvCurrentSpeed)
         tvStatus = findViewById(R.id.tvStatus)
-        tvSchoolZone = findViewById(R.id.tvSchoolZone)
         tvKmhLabel = findViewById(R.id.tvKmhLabel)
         tvLimitLabel = findViewById(R.id.tvLimitLabel)
         tvVolLabel = findViewById(R.id.tvVolLabel)
@@ -137,10 +135,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
         
-        SpeedAlertService.schoolZoneLiveData.observe(this) { inZone ->
-            tvSchoolZone.visibility = if (inZone) View.VISIBLE else View.GONE
-        }
-
         checkPermissions()
         requestBatteryOptimizationExemption()
     }
