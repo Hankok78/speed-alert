@@ -11,8 +11,10 @@ import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import android.webkit.WebView
@@ -27,15 +29,21 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvSpeedLimit: TextView
     private lateinit var tvCurrentSpeed: TextView
     private lateinit var tvStatus: TextView
+    private lateinit var tvSchoolZone: TextView
+    private lateinit var tvKmhLabel: TextView
+    private lateinit var tvLimitLabel: TextView
+    private lateinit var tvVolLabel: TextView
+    private lateinit var tvVolPercent: TextView
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
     private lateinit var btnNightMode: Button
+    private lateinit var btnLang: Button
+    private lateinit var seekVolume: SeekBar
     private lateinit var mapWebView: WebView
     private lateinit var rootLayout: LinearLayout
     private lateinit var headerLayout: LinearLayout
     private lateinit var footerLayout: LinearLayout
-    private lateinit var tvKmhLabel: TextView
-    private lateinit var tvLimitLabel: TextView
+    private lateinit var volumeLayout: LinearLayout
     private lateinit var prefs: SharedPreferences
 
     private val LOCATION_PERMISSION_CODE = 1001
@@ -43,6 +51,9 @@ class MainActivity : AppCompatActivity() {
     
     private var isNightMode = false
     private var isManualOverride = false
+    private val languages = listOf("ro", "de", "en")
+    private val langLabels = listOf("RO", "DE", "EN")
+    private var langIndex = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -50,31 +61,54 @@ class MainActivity : AppCompatActivity() {
 
         prefs = getSharedPreferences("speed_alert_prefs", Context.MODE_PRIVATE)
         isManualOverride = prefs.getBoolean("manual_override", false)
-        isNightMode = if (isManualOverride) {
-            prefs.getBoolean("night_mode", false)
-        } else {
-            isNightTimeAuto()
-        }
+        isNightMode = if (isManualOverride) prefs.getBoolean("night_mode", false) else isNightTimeAuto()
+        langIndex = prefs.getInt("lang_index", 0)
+        SpeedAlertService.currentLanguage = languages[langIndex]
 
         tvSpeedLimit = findViewById(R.id.tvSpeedLimit)
         tvCurrentSpeed = findViewById(R.id.tvCurrentSpeed)
         tvStatus = findViewById(R.id.tvStatus)
+        tvSchoolZone = findViewById(R.id.tvSchoolZone)
+        tvKmhLabel = findViewById(R.id.tvKmhLabel)
+        tvLimitLabel = findViewById(R.id.tvLimitLabel)
+        tvVolLabel = findViewById(R.id.tvVolLabel)
+        tvVolPercent = findViewById(R.id.tvVolPercent)
         btnStart = findViewById(R.id.btnStart)
         btnStop = findViewById(R.id.btnStop)
         btnNightMode = findViewById(R.id.btnNightMode)
+        btnLang = findViewById(R.id.btnLang)
+        seekVolume = findViewById(R.id.seekVolume)
         mapWebView = findViewById(R.id.mapWebView)
         rootLayout = findViewById(R.id.rootLayout)
         headerLayout = findViewById(R.id.headerLayout)
         footerLayout = findViewById(R.id.footerLayout)
-        tvKmhLabel = findViewById(R.id.tvKmhLabel)
-        tvLimitLabel = findViewById(R.id.tvLimitLabel)
+        volumeLayout = findViewById(R.id.volumeLayout)
+
+        // Restore volume
+        val savedVol = prefs.getInt("tts_volume", 100)
+        seekVolume.progress = savedVol
+        tvVolPercent.text = "$savedVol%"
+        SpeedAlertService.ttsVolume = savedVol / 100f
 
         setupMap()
         applyTheme()
+        btnLang.text = langLabels[langIndex]
 
         btnStart.setOnClickListener { startService() }
         btnStop.setOnClickListener { stopService() }
         btnNightMode.setOnClickListener { toggleNightMode() }
+        btnLang.setOnClickListener { cycleLang() }
+        
+        seekVolume.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                val vol = if (progress < 5) 5 else progress
+                tvVolPercent.text = "$vol%"
+                SpeedAlertService.ttsVolume = vol / 100f
+                prefs.edit().putInt("tts_volume", vol).apply()
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
 
         SpeedAlertService.speedLimitLiveData.observe(this) { limit ->
             tvSpeedLimit.text = when {
@@ -94,7 +128,6 @@ class MainActivity : AppCompatActivity() {
         
         SpeedAlertService.locationLiveData.observe(this) { location ->
             updateMapLocation(location.first, location.second)
-            // Auto-comutare la fiecare update de locatie (daca nu e manual)
             if (!isManualOverride) {
                 val shouldBeNight = isNightTimeAuto()
                 if (shouldBeNight != isNightMode) {
@@ -102,6 +135,10 @@ class MainActivity : AppCompatActivity() {
                     applyTheme()
                 }
             }
+        }
+        
+        SpeedAlertService.schoolZoneLiveData.observe(this) { inZone ->
+            tvSchoolZone.visibility = if (inZone) View.VISIBLE else View.GONE
         }
 
         checkPermissions()
@@ -113,6 +150,18 @@ class MainActivity : AppCompatActivity() {
         return hour >= 20 || hour < 7
     }
     
+    private fun cycleLang() {
+        langIndex = (langIndex + 1) % languages.size
+        SpeedAlertService.currentLanguage = languages[langIndex]
+        btnLang.text = langLabels[langIndex]
+        prefs.edit().putInt("lang_index", langIndex).apply()
+        // Actualizeaza TTS locale daca serviciul ruleaza
+        try {
+            val serviceField = SpeedAlertService::class.java
+            // Just update the language - TTS will use it on next speak call
+        } catch (e: Exception) {}
+    }
+    
     private fun toggleNightMode() {
         isNightMode = !isNightMode
         isManualOverride = true
@@ -122,7 +171,6 @@ class MainActivity : AppCompatActivity() {
             .apply()
         applyTheme()
         
-        // Dupa 30 min, revine la auto
         mapWebView.postDelayed({
             isManualOverride = false
             prefs.edit().putBoolean("manual_override", false).apply()
@@ -136,32 +184,34 @@ class MainActivity : AppCompatActivity() {
     
     private fun applyTheme() {
         if (isNightMode) {
-            // MOD NOAPTE - foarte intunecat, rosu pentru ochi
             rootLayout.setBackgroundColor(Color.BLACK)
             headerLayout.setBackgroundColor(Color.BLACK)
             footerLayout.setBackgroundColor(Color.BLACK)
+            volumeLayout.setBackgroundColor(Color.BLACK)
             tvCurrentSpeed.setTextColor(Color.parseColor("#CC0000"))
             tvKmhLabel.setTextColor(Color.parseColor("#660000"))
             tvLimitLabel.setTextColor(Color.parseColor("#660000"))
             tvStatus.setTextColor(Color.parseColor("#660000"))
             tvSpeedLimit.setTextColor(Color.parseColor("#CC0000"))
-            btnNightMode.text = "ZI"
+            tvVolLabel.setTextColor(Color.parseColor("#440000"))
+            tvVolPercent.setTextColor(Color.parseColor("#440000"))
+            btnNightMode.text = "Z"
             btnNightMode.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#330000"))
-            // Harta dark
             mapWebView.evaluateJavascript("if(typeof switchToDark==='function')switchToDark();", null)
         } else {
-            // MOD ZI - normal
             rootLayout.setBackgroundColor(Color.parseColor("#1a1a2e"))
             headerLayout.setBackgroundColor(Color.parseColor("#0f0f1a"))
             footerLayout.setBackgroundColor(Color.parseColor("#0f0f1a"))
+            volumeLayout.setBackgroundColor(Color.parseColor("#0a0a15"))
             tvCurrentSpeed.setTextColor(Color.parseColor("#00d9ff"))
             tvKmhLabel.setTextColor(Color.parseColor("#888888"))
             tvLimitLabel.setTextColor(Color.parseColor("#aaaaaa"))
             tvStatus.setTextColor(Color.parseColor("#888888"))
             tvSpeedLimit.setTextColor(Color.WHITE)
-            btnNightMode.text = "NOAPTE"
+            tvVolLabel.setTextColor(Color.parseColor("#666666"))
+            tvVolPercent.setTextColor(Color.parseColor("#666666"))
+            btnNightMode.text = "N"
             btnNightMode.backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#555555"))
-            // Harta light
             mapWebView.evaluateJavascript("if(typeof switchToLight==='function')switchToLight();", null)
         }
     }
@@ -216,7 +266,6 @@ currentLayer.addTo(map);
         
         mapWebView.loadData(android.util.Base64.encodeToString(html.toByteArray(), android.util.Base64.NO_PADDING), "text/html", "base64")
         
-        // Aplica tema dupa ce harta se incarca
         mapWebView.postDelayed({
             if (isNightMode) {
                 mapWebView.evaluateJavascript("if(typeof switchToDark==='function')switchToDark();", null)
@@ -243,24 +292,20 @@ currentLayer.addTo(map);
 
     private fun checkPermissions() {
         val permissions = mutableListOf<String>()
-
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION)
             != PackageManager.PERMISSION_GRANTED) {
             permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
         }
-
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION)
             != PackageManager.PERMISSION_GRANTED) {
             permissions.add(Manifest.permission.ACCESS_COARSE_LOCATION)
         }
-
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
                 != PackageManager.PERMISSION_GRANTED) {
                 permissions.add(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
-
         if (permissions.isNotEmpty()) {
             ActivityCompat.requestPermissions(this, permissions.toTypedArray(), LOCATION_PERMISSION_CODE)
         } else {
@@ -272,7 +317,7 @@ currentLayer.addTo(map);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_BACKGROUND_LOCATION)
                 != PackageManager.PERMISSION_GRANTED) {
-                Toast.makeText(this, "Permite locația în fundal pentru funcționare cu ecranul închis!", Toast.LENGTH_LONG).show()
+                Toast.makeText(this, "Permite locația în fundal!", Toast.LENGTH_LONG).show()
                 ActivityCompat.requestPermissions(
                     this,
                     arrayOf(Manifest.permission.ACCESS_BACKGROUND_LOCATION),
@@ -288,7 +333,6 @@ currentLayer.addTo(map);
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        
         when (requestCode) {
             LOCATION_PERMISSION_CODE -> {
                 if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
@@ -300,7 +344,7 @@ currentLayer.addTo(map);
 
     private fun startService() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
-            Toast.makeText(this, "Permite afișarea peste alte aplicații pentru bubble!", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Permite afișarea peste alte aplicații!", Toast.LENGTH_LONG).show()
             val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
             startActivityForResult(intent, 1234)
             return
