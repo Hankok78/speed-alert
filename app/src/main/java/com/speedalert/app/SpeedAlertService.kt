@@ -62,6 +62,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
     private val serviceScope = CoroutineScope(Dispatchers.IO + Job())
     
     private var speedingWarned = false
+    private var lastLimitChangeTime = 0L
     private val handler = Handler(Looper.getMainLooper())
     
     private var cachedSpeedLimit = 0
@@ -183,7 +184,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
         if (ttsReady && tts != null) {
             val params = Bundle()
             params.putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, ttsVolume)
-            tts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, "urgent_${System.currentTimeMillis()}")
+            tts?.speak(text, TextToSpeech.QUEUE_ADD, params, "urgent_${System.currentTimeMillis()}")
         }
     }
 
@@ -244,6 +245,7 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                 speedLimitLiveData.postValue(limit)
                 lastAnnouncedLimit = limit
                 speedingWarned = false
+                lastLimitChangeTime = System.currentTimeMillis()
                 
                 handler.post {
                     if (limit == NO_LIMIT) {
@@ -257,12 +259,15 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
             }
         }
         
-        // Avertizare depasire - simplu, o singura data
-        if (cachedSpeedLimit > 0 && speedKmh > cachedSpeedLimit + 3 && !speedingWarned) {
-            speedingWarned = true
-            handler.post { announceUrgent(t("speeding")) }
-        } else if (cachedSpeedLimit > 0 && speedKmh <= cachedSpeedLimit) {
-            speedingWarned = false
+        // Avertizare depasire - doar dupa 5 sec de la schimbarea limitei
+        val timeSinceLimitChange = System.currentTimeMillis() - lastLimitChangeTime
+        if (cachedSpeedLimit > 0 && timeSinceLimitChange > 5000) {
+            if (speedKmh > cachedSpeedLimit + 5 && !speedingWarned) {
+                speedingWarned = true
+                handler.post { announceUrgent(t("speeding")) }
+            } else if (speedKmh <= cachedSpeedLimit) {
+                speedingWarned = false
+            }
         }
     }
     
