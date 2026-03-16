@@ -373,10 +373,13 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                     (
                       way(around:5000,$lat,$lon)["highway"~"motorway|trunk|primary|secondary|tertiary|residential|living_street|unclassified"]["maxspeed"];
                       way(around:5000,$lat,$lon)["highway"~"motorway|trunk|primary|secondary|tertiary|residential|living_street|unclassified"][!"maxspeed"];
+                    );
+                    out body geom;
+                    (
                       node(around:5000,$lat,$lon)["amenity"="school"];
                       way(around:5000,$lat,$lon)["amenity"="school"];
                     );
-                    out body geom center;
+                    out center;
                 """.trimIndent()
                 
                 val url = URL("https://overpass-api.de/api/interpreter")
@@ -408,22 +411,28 @@ class SpeedAlertService : Service(), TextToSpeech.OnInitListener, LocationListen
                     for (i in 0 until elements.length()) {
                         val elem = elements.getJSONObject(i)
                         val tags = elem.optJSONObject("tags")
+                        val elemType = elem.optString("type", "")
                         
-                        // Este scoala?
+                        // Este scoala? (din out center - node cu lat/lon sau way cu center)
                         if (tags?.optString("amenity") == "school") {
                             val schoolName = tags.optString("name", "Scoala")
                             if (elem.has("lat") && elem.has("lon")) {
-                                // node
                                 newSchools.add(SchoolLocation(elem.getDouble("lat"), elem.getDouble("lon"), schoolName))
                             } else if (elem.has("center")) {
-                                // way cu center
                                 val center = elem.getJSONObject("center")
                                 newSchools.add(SchoolLocation(center.getDouble("lat"), center.getDouble("lon"), schoolName))
                             }
                             continue
                         }
                         
-                        // Este drum
+                        // Scoala fara tags (din out center minimal)
+                        if (tags == null && elem.has("center")) {
+                            val center = elem.getJSONObject("center")
+                            newSchools.add(SchoolLocation(center.getDouble("lat"), center.getDouble("lon"), "Scoala"))
+                            continue
+                        }
+                        
+                        // Este drum (din out body geom)
                         if (tags == null) continue
                         val geom = elem.optJSONArray("geometry") ?: continue
                         
