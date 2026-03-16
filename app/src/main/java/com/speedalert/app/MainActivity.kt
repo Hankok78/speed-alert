@@ -238,7 +238,7 @@ html,body,#map{margin:0;padding:0;width:100%;height:100%;}
 <body>
 <div id="map"></div>
 <script>
-var map=L.map('map').setView([48.1351,11.5820],15);
+var map=L.map('map',{attributionControl:false}).setView([48.1351,11.5820],15);
 var lightLayer=L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19});
 var darkLayer=L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{maxZoom:19});
 var currentLayer=lightLayer;
